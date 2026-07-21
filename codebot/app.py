@@ -612,6 +612,8 @@ class CodeBotApp(App):
         self.session_manager: SessionManager | None = None
         self.session: Session | None = None
         self.memory_manager: MemoryManager | None = None
+        # RAG 第一期：记忆语义检索索引（懒加载，embedding 可用时替代 LLM 选择器）
+        self._semantic_memory_index = None
         self._instructions_content: str = ""
         self.command_registry = CommandRegistry()
         register_all_commands(self.command_registry)
@@ -713,9 +715,13 @@ class CodeBotApp(App):
         self._load_skill_tool = load_skill_tool
 
         self.registry.register(
-            ToolSearchTool(self.registry, protocol=provider.protocol)
+            ToolSearchTool(self.registry, protocol=provider.protocol,
+                           embedder=self._get_embedder(provider))
         )
         self.registry.register(AskUserTool())
+
+        # RAG 第二期：初始化语义代码搜索（依赖未装时静默降级）
+        self._init_rag_code_search(provider)
 
         from codebot.tools.exit_plan_mode import ExitPlanModeTool
         self._exit_plan_tool = ExitPlanModeTool()
@@ -1177,6 +1183,10 @@ class CodeBotApp(App):
         user_dir = self.memory_manager.user_mem_dir
         project_dir = self.memory_manager.project_mem_dir
 
+        # RAG 第一期：优先用语义检索（embedding 可用时）
+        # 懒加载 SemanticMemoryIndex——只有第一次用到时才创建 embedding provider
+        semantic_index = self._get_semantic_memory_index(provider)
+
         async def selector(system_prompt: str, user_message: str) -> str:
             from codebot.tools.base import StreamEnd, TextDelta
 
@@ -1200,12 +1210,75 @@ class CodeBotApp(App):
                     recent_tools=None,
                     already_surfaced=None,
                     selector=selector,
+                    semantic_index=semantic_index,
                 ),
                 timeout=8.0,
             )
             return render_reminder(results)
         except (asyncio.TimeoutError, Exception):
             return ""
+
+    def _get_semantic_memory_index(self, provider: ProviderConfig):
+        """懒加载记忆语义索引。embedding 不可用时返回 None（上层回退 LLM 选择器）。"""
+        if self._semantic_memory_index is not None:
+            return self._semantic_memory_index
+        try:
+            from codebot.rag import create_embedding_provider
+            from codebot.memory.semantic_recall import SemanticMemoryIndex
+
+            embedder = create_embedding_provider(provider)
+            if not embedder.is_available():
+                return None  # 协议不支持 / key 缺失 → 走 LLM 选择器
+            self._semantic_memory_index = SemanticMemoryIndex(embedder)
+            return self._semantic_memory_index
+        except Exception:
+            # 任何初始化失败都静默降级——RAG 是增强，不是依赖
+            return None
+
+    def _get_embedder(self, provider: ProviderConfig):
+        """懒加载共享的 EmbeddingProvider（供 ToolSearch 语义匹配等复用）。
+
+        不可用时返回 None，调用方各自走 fallback。
+        """
+        if not hasattr(self, "_shared_embedder"):
+            try:
+                from codebot.rag import create_embedding_provider
+                self._shared_embedder = create_embedding_provider(provider)
+                if not self._shared_embedder.is_available():
+                    self._shared_embedder = None
+            except Exception:
+                self._shared_embedder = None
+        return self._shared_embedder
+
+    def _init_rag_code_search(self, provider: ProviderConfig) -> None:
+        """初始化语义代码搜索（第二期 RAG）。
+
+        链路：EmbeddingProvider → QdrantCodeStore → IncrementalIndexer → CodeSearch
+        任一环节不可用（依赖未装/key 缺失）都静默降级，CodeSearch 保留降级提示能力。
+        """
+        try:
+            from codebot.rag import create_embedding_provider
+            from codebot.rag.qdrant_store import create_code_store
+            from codebot.rag.indexer import IncrementalIndexer
+            from codebot.tools.code_search import CodeSearch
+
+            embedder = create_embedding_provider(provider)
+            if not embedder.is_available():
+                return  # embedding 不可用 → CodeSearch 保持降级态
+
+            work_dir = self._work_dir if hasattr(self, "_work_dir") else os.getcwd()
+            store = create_code_store(embedder, project_root=work_dir)
+            if not store.is_available():
+                return  # Qdrant 未装 → 降级
+
+            indexer = IncrementalIndexer(work_dir, store)
+
+            # 用带 indexer/embedder 的 CodeSearch 覆盖默认降级版
+            code_search = CodeSearch(indexer=indexer, embedder=embedder)
+            self.registry.register(code_search)
+        except Exception:
+            # RAG 是增强，任何失败都不影响主流程
+            pass
 
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
         assert self.agent is not None

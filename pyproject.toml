@@ -13,6 +13,15 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
+# RAG 扩展依赖（第一期+第二期+第三期）。
+# 不装也能用项目原有全部功能；装了则启用语义检索能力。
+# - qdrant-client：向量库（默认嵌入式模式，无需起服务，clone 即用）
+# 注：BM25 用项目自实现的 rag/bm25.py，不引外部包，保持轻量。
+[project.optional-dependencies]
+rag = [
+    "qdrant-client>=1.7.0",
+]
+
 [project.scripts]
 codebot = "codebot.__main__:main"
 

@@ -1,1 +1,280 @@
-cd E:\NewCode_agent\-CodeBot-Coding-Agent && .venv\Scripts\python.exe -m codebot
+================================================================================
+                    CodeBot 项目启动指南（通用版）
+          任何人只要具备下列环境，按步骤执行即可把项目跑起来
+================================================================================
+
+
+一、前置环境要求
+--------------------------------------------------------------------------------
+
+  1. Python        >= 3.11        （执行 python --version 确认）
+  2. Git           任意版本        （执行 git --version 确认）
+  3. uv            推荐使用        （执行 uv --version 确认，没有见第二步安装）
+  4. LLM API Key   二选一即可：
+                     - Anthropic API Key  （用 Claude 模型，推荐）
+                     - OpenAI 兼容 API Key（用 GPT / DeepSeek / Qwen / Ollama 等）
+
+
+二、获取代码并进入项目目录
+--------------------------------------------------------------------------------
+
+  # 方式 A：从 GitHub 克隆（如果仓库可访问）
+  git clone https://github.com/1144zhang/terminal-codebot.git
+  cd terminal-codebot
+
+  # 方式 B：已有本地代码，直接进入项目根目录
+  cd /你的/项目/路径/terminal-codebot
+
+  # 后续所有命令都在项目根目录下执行（即包含 pyproject.toml 的目录）
+
+
+三、安装依赖
+--------------------------------------------------------------------------------
+
+  ---------- 方式一：uv（推荐，速度快 10-100 倍）----------
+
+  # 3.1 安装 uv（已安装可跳过）
+  #    Windows (PowerShell):
+  powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+  #    Linux / macOS:
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  # 3.2 创建虚拟环境（自动用 Python 3.11+）
+  uv venv
+
+  # 3.3 激活虚拟环境
+  #    Windows (CMD):
+  .venv\Scripts\activate
+  #    Windows (PowerShell):
+  .venv\Scripts\Activate.ps1
+  #    Linux / macOS:
+  source .venv/bin/activate
+
+  # 3.4 安装项目及全部依赖（含 codebot 命令行入口）
+  uv pip install -e .
+
+
+  ---------- 方式二：pip（无需 uv）----------
+
+  # 3.1 创建虚拟环境
+  #    Windows:
+  python -m venv .venv
+  #    Linux / macOS:
+  python3 -m venv .venv
+
+  # 3.2 激活虚拟环境
+  #    Windows (CMD):
+  .venv\Scripts\activate
+  #    Windows (PowerShell):
+  .venv\Scripts\Activate.ps1
+  #    Linux / macOS:
+  source .venv/bin/activate
+
+  # 3.3 安装项目及全部依赖
+  pip install -e .
+
+
+四、配置 API Key（环境变量）
+--------------------------------------------------------------------------------
+
+  任选一个模型供应商，把对应的 Key 设为环境变量。
+  配置文件里用 ${VAR_NAME} 引用，不用把 Key 写进文件。
+
+  ---------- Anthropic（Claude，推荐）----------
+
+  #    Windows (CMD):
+  set ANTHROPIC_API_KEY=你的Anthropic密钥
+  #    Windows (PowerShell):
+  $env:ANTHROPIC_API_KEY="你的Anthropic密钥"
+  #    Linux / macOS:
+  export ANTHROPIC_API_KEY="你的Anthropic密钥"
+
+  ---------- OpenAI 兼容（GPT / DeepSeek / Qwen / Ollama 等）----------
+
+  #    Windows (CMD):
+  set OPENAI_API_KEY=你的密钥
+  #    Windows (PowerShell):
+  $env:OPENAI_API_KEY="你的密钥"
+  #    Linux / macOS:
+  export OPENAI_API_KEY="你的密钥"
+
+  注意：环境变量只在当前终端窗口有效，关闭后需重新设置。
+       如需永久生效，请写入系统环境变量或 shell 配置文件（.bashrc / .zshrc）。
+
+
+五、创建配置文件
+--------------------------------------------------------------------------------
+
+  在项目根目录下创建 .codebot\config.yaml（项目级配置）：
+
+  #    Windows (CMD):
+  if not exist .codebot mkdir .codebot
+  #    Linux / macOS:
+  mkdir -p .codebot
+
+  然后把下面的内容保存到  .codebot/config.yaml  文件中（按你的 Key 二选一）：
+
+  ==================== 配置文件开始（用 Anthropic / Claude）====================
+
+  providers:
+    - name: claude
+      protocol: anthropic
+      base_url: https://api.anthropic.com
+      model: claude-sonnet-4-5-20250929
+      api_key: ${ANTHROPIC_API_KEY}
+      thinking: true
+
+  permission_mode: default
+
+  mcp_servers: []
+
+  enable_fork: false
+  enable_verification_agent: false
+  teammate_mode: ""
+  enable_coordinator_mode: false
+
+  hooks: []
+
+  worktree:
+    symlink_directories:
+      - node_modules
+      - .venv
+    stale_cleanup_interval: 3600
+    stale_cutoff_hours: 24
+
+  ==================== 配置文件结束 ====================
+
+
+  ==================== 配置文件开始（用 OpenAI 兼容 / DeepSeek 等）====================
+
+  providers:
+    - name: deepseek
+      protocol: openai-compat
+      base_url: https://api.deepseek.com/v1
+      model: deepseek-chat
+      api_key: ${OPENAI_API_KEY}
+
+  permission_mode: default
+
+  mcp_servers: []
+
+  enable_fork: false
+  enable_verification_agent: false
+  teammate_mode: ""
+  enable_coordinator_mode: false
+
+  hooks: []
+
+  worktree:
+    symlink_directories:
+      - node_modules
+      - .venv
+    stale_cleanup_interval: 3600
+    stale_cutoff_hours: 24
+
+  ==================== 配置文件结束 ====================
+
+  说明：
+  - protocol 可选值：anthropic / openai / openai-compat
+  - openai-compat 适用于 DeepSeek、通义千问、Ollama、vLLM 等兼容 OpenAI 协议的服务
+  - 如果用 Ollama 本地模型，base_url 改为 http://localhost:11434/v1，api_key 随便填
+
+
+六、启动项目
+--------------------------------------------------------------------------------
+
+  确保已激活虚拟环境（第三步），且已设置 API Key 环境变量（第四步）。
+
+  ---------- 方式一：交互式 TUI（推荐，日常使用）----------
+
+  # 安装后可直接用命令
+  codebot
+
+  # 或用 Python 模块方式启动（等价）
+  python -m codebot
+
+  # 指定权限模式启动（可选）
+  codebot --mode plan            # Plan 模式：先规划再执行
+  codebot --mode acceptEdits     # 自动接受文件编辑
+  codebot --mode default         # 默认安全模式
+
+
+  ---------- 方式二：命令行单次执行（适合脚本/自动化）----------
+
+  codebot -p "帮我写一个 Python 的快速排序函数"
+
+  # 或
+  python -m codebot -p "分析 main.py 的代码结构"
+
+
+  ---------- 方式三：开发模式（用 uv run，免激活虚拟环境）----------
+
+  uv run codebot
+  uv run codebot -p "你的提示词"
+
+
+七、验证启动是否成功
+--------------------------------------------------------------------------------
+
+  启动成功后：
+  - 交互模式：终端会出现 CodeBot 的 TUI 界面（顶部状态栏 + 聊天区 + 输入框）
+  - 命令行模式：直接输出 LLM 的回复到 stdout
+
+  如果报错，按第八步排查。
+
+
+八、常见问题排查
+--------------------------------------------------------------------------------
+
+  Q1: 报错 "Anthropic API key not found"
+  A: 没设置 ANTHROPIC_API_KEY 环境变量，回到第四步设置。
+     注意环境变量只在当前终端窗口有效。
+
+  Q2: 报错 "Error: No module named 'codebot'"
+  A: 没有激活虚拟环境，或没有执行 pip install -e .
+     回到第三步激活虚拟环境并安装依赖。
+
+  Q3: 报错 "ConfigError" 或配置加载失败
+  A: 检查 .codebot/config.yaml 是否存在、YAML 缩进是否正确、protocol 拼写是否对。
+
+  Q4: TUI 界面乱码或显示异常
+  A: 确保终端支持 UTF-8 且字体支持中文。Windows 推荐用 Windows Terminal。
+
+  Q5: 启动慢 / 卡在连接 MCP
+  A: 如果配了 mcp_servers，某个 Server 连不上会等待。可以先清空 mcp_servers: []。
+
+  Q6: 想看详细日志
+  A: 启动后日志写在  .codebot/debug.log  文件里，可以用文本编辑器打开查看。
+
+
+九、快速启动（懒人版，已装好 Python + uv）
+--------------------------------------------------------------------------------
+
+  # 一行接一行执行（Windows CMD + Anthropic 为例）：
+
+  git clone https://github.com/1144zhang/terminal-codebot.git
+  cd terminal-codebot
+  uv venv
+  .venv\Scripts\activate
+  uv pip install -e .
+  set ANTHROPIC_API_KEY=你的密钥
+  mkdir .codebot 2>nul
+  (然后把第五步的配置内容存成 .codebot\config.yaml)
+  codebot
+
+  # Linux / macOS 等价命令：
+
+  git clone https://github.com/1144zhang/terminal-codebot.git
+  cd terminal-codebot
+  uv venv
+  source .venv/bin/activate
+  uv pip install -e .
+  export ANTHROPIC_API_KEY="你的密钥"
+  mkdir -p .codebot
+  (然后把第五步的配置内容存成 .codebot/config.yaml)
+  codebot
+
+
+================================================================================
+  完成！启动后在输入框输入问题即可开始使用，输入 /help 查看可用命令。
+================================================================================

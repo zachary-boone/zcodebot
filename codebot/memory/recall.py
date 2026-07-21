@@ -10,7 +10,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from codebot.memory.semantic_recall import SemanticMemoryIndex
 
 
 # ---------------------------------------------------------------------------
@@ -242,12 +245,17 @@ async def find_relevant_memories(
     recent_tools: list[str] | None,
     already_surfaced: set[str] | None,
     selector: SelectorFn,
+    semantic_index: "SemanticMemoryIndex | None" = None,
 ) -> list[RelevantMemory]:
     """Scan both dirs, filter already-surfaced, ask selector to pick up to 5
     relevant filenames, and return the corresponding paths + mtimes.
 
     Selector failures are silent — recall is best-effort and must never block
     the main conversation.
+
+    语义检索（第一期 RAG 优化）：
+      若传入 semantic_index 且可用，优先走 embedding 相似度检索，
+      省一次 LLM 调用且基于正文语义；不可用或失败则回退到 LLM 选择器。
     """
     all_headers: list[MemoryHeader] = []
     if user_mem_dir is not None:
@@ -259,6 +267,24 @@ async def find_relevant_memories(
     candidates = [m for m in all_headers if m.file_path not in surfaced]
     if not candidates:
         return []
+
+    # 优先语义检索（embedding 可用时）
+    if semantic_index is not None and semantic_index.is_available():
+        try:
+            await semantic_index.ensure(candidates)
+            selected_paths = await semantic_index.search(query)
+            if selected_paths:
+                by_path = {m.file_path: m for m in candidates}
+                result = [
+                    RelevantMemory(path=p, mtime_ms=by_path[p].mtime_ms)
+                    for p in selected_paths
+                    if p in by_path
+                ]
+                if result:
+                    return result
+            # 语义检索没命中任何相关记忆 → 回退到 LLM 选择器
+        except Exception:
+            pass  # 任何失败都静默回退
 
     selected_filenames = await _select_relevant_memories(
         query, candidates, recent_tools, selector

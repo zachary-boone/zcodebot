@@ -36,9 +36,12 @@ class ToolSearchTool(Tool):
         self,
         registry: ToolRegistry,
         protocol: str = "anthropic",
+        embedder=None,
     ) -> None:
         self._registry = registry
         self._protocol = protocol
+        # 第三期 RAG：可选的语义匹配 embedder。未注入时走关键词 fallback。
+        self._embedder = embedder
 
 
     def get_schema(self) -> dict[str, Any]:
@@ -59,6 +62,11 @@ class ToolSearchTool(Tool):
         if query.startswith("select:"):
             names = [n.strip() for n in query[7:].split(",")]
             schemas = self._registry.find_deferred_by_names(names, self._protocol)
+        elif self._embedder is not None:
+            # 第三期 RAG：有 embedder 时优先语义匹配（内部失败会回退关键词）
+            schemas = await self._registry.search_deferred_semantic(
+                query, max_results, self._protocol, self._embedder
+            )
         else:
             schemas = self._registry.search_deferred(
                 query, max_results, self._protocol

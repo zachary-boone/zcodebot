@@ -91,6 +91,67 @@ class ToolRegistry:
                 results.append(base)
         return results
 
+    async def search_deferred_semantic(
+        self,
+        query: str,
+        max_results: int,
+        protocol: str = "anthropic",
+        embedder: Any = None,
+    ) -> list[dict[str, Any]]:
+        """语义增强的工具搜索（第三期 RAG）。
+
+        若传入 embedder 且可用，用 embedding 余弦相似度匹配工具；
+        否则回退到关键词版 search_deferred（保留 fallback）。
+
+        语义匹配的优势：用户搜 "build codebase" 能匹配到 "CodeSearch"
+        （即使字面没有 build/codebase 关键词）。
+        工具数量少时收益有限，这里更多是展示"RAG 思路复用"。
+        """
+        # embedder 不可用 → 回退关键词
+        if embedder is None or not embedder.is_available():
+            return self.search_deferred(query, max_results, protocol)
+
+        # 收集所有延迟工具的 name+description
+        deferred: list[tuple[str, Tool]] = []
+        for name, tool in self._tools.items():
+            if not getattr(tool, "should_defer", False):
+                continue
+            if name in self._disabled:
+                continue
+            deferred.append((name, tool))
+        if not deferred:
+            return []
+
+        from codebot.rag.embedding import EmbeddingError, cosine_similarity
+
+        try:
+            texts = [f"{name}: {tool.description}" for name, tool in deferred]
+            all_vecs = await embedder.embed([query] + texts)
+            q_vec = all_vecs[0]
+            cand_vecs = all_vecs[1:]
+        except EmbeddingError:
+            return self.search_deferred(query, max_results, protocol)
+
+        scored: list[tuple[float, str, Tool]] = []
+        for vec, (name, tool) in zip(cand_vecs, deferred):
+            score = cosine_similarity(q_vec, vec)
+            scored.append((score, name, tool))
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        results: list[dict[str, Any]] = []
+        for _, _name, tool in scored[:max_results]:
+            base = tool.get_schema()
+            if protocol in ("openai", "openai-compat"):
+                results.append({
+                    "type": "function",
+                    "name": base["name"],
+                    "description": base["description"],
+                    "parameters": base["input_schema"],
+                })
+            else:
+                results.append(base)
+        return results
+
     def find_deferred_by_names(
         self, names: list[str], protocol: str = "anthropic"
     ) -> list[dict[str, Any]]:
@@ -155,4 +216,9 @@ def create_default_registry(file_cache: FileCache | None = None, file_history: A
     registry.register(Bash())
     registry.register(Glob())
     registry.register(Grep())
+
+    # RAG 第二期：语义代码搜索（依赖未装时自动降级，不影响其他工具）
+    from codebot.tools.code_search import CodeSearch
+    registry.register(CodeSearch())  # 默认 indexer/embedder 为 None → 降级提示用 Grep
+
     return registry
