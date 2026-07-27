@@ -633,8 +633,10 @@ class NetworkError(LLMError): pass  # 网络不通
 
 LLM 可能一次返回多个工具调用。但有些能并发，有些必须串行：
 
-- ✅ **可以并发**：读文件、搜代码（只读，不影响文件系统）
+- ✅ **可以并发**：读文件、搜代码、语义搜索（只读，不影响文件系统）
 - ❌ **必须串行**：写文件、跑命令（有副作用，有依赖关系）
+
+> **RAG 补充**：新增的 `CodeSearch` 工具（语义代码搜索）是 `category="read"` + `is_concurrency_safe=True`，可以和 `ReadFile`/`Grep` 在同一并发批次里执行。它的索引构建（`rebuild_if_needed`）在工具执行时按需触发增量更新，不阻塞主循环。详见阶段7。
 
 **为什么写文件不能并发？** 想象 LLM 同时调 `WriteFile(a.py)` 和 `EditFile(a.py)`——两个并发执行会互相覆盖，结果不可预测。
 

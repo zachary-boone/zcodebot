@@ -120,7 +120,12 @@ worktree:
 ### 启动
 
 ```bash
+# 交互式 TUI（默认）
 codebot
+
+# Web UI（浏览器界面，需安装 web 扩展依赖）
+uv pip install -e ".[web]"
+codebot --web
 ```
 
 ### 命令行模式
@@ -128,6 +133,8 @@ codebot
 ```bash
 codebot -p "帮我写一个 Python 的快速排序函数"
 ```
+
+> Web UI 的详细说明见 [docs/web-ui.md](docs/web-ui.md)。
 
 ## 权限模式
 

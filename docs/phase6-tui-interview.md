@@ -214,18 +214,19 @@ async def cleanup_stale_worktrees(interval: int = 3600, cutoff_hours: int = 24):
 
 | 指标 | 值 |
 |------|-----|
-| 总代码量 | ~15,000 行 Python |
+| 总代码量 | ~16,000 行 Python（含 RAG 子系统） |
 | 核心文件 | agent.py (1300行), app.py (1900行), client.py (800行) |
-| 内置工具 | 20+ |
+| 内置工具 | 21+（含 CodeSearch 语义搜索） |
 | 内置命令 | 14 个斜杠命令 |
 | 内置 Skill | 4 个（commit, review, test, backend-interview） |
 | 内置子 Agent | 4 个（explore, plan, verification, general-purpose） |
 | 安全层数 | 6 层（Plan例外 → 白名单 → 黑名单 → 沙箱 → 规则 → 模式 → 确认） |
 | 支持协议 | 3 种（Anthropic Messages / OpenAI Responses / OpenAI Chat Completions） |
 | 生命周期事件 | 12 种（Hook） |
-| 测试文件 | 17 个 |
+| RAG 子系统 | 8 模块（embedding/chunker/qdrant_store/indexer/bm25/fusion/reranker + semantic_recall） |
+| 测试文件 | 20 个（17 核心 + 3 RAG，共 63 个测试用例） |
 
-### 3.3 七个关键技术决策
+### 3.3 九个关键技术决策
 
 | 决策 | 理由 | 替代方案与不选的原因 |
 |------|------|---------------------|
@@ -236,6 +237,9 @@ async def cleanup_stale_worktrees(interval: int = 3600, cutoff_hours: int = 24):
 | Future + await 做权限确认 | Agent 代码自然流动，不阻塞 TUI | 回调（回调地狱）、同步阻塞（卡死） |
 | 文件系统做团队通信 | 本地 Agent 无需网络开销，消息不丢失 | Redis（重依赖） |
 | 双层压缩做长对话 | Layer1 裁剪结果 + Layer2 摘要历史 | 单层（不够灵活） |
+| **AST 分块做代码 RAG** | 按函数/类切保证语义完整，是代码 RAG 区别于文档 RAG 的核心 | 固定字符切（切碎函数，语义破碎） |
+| **RRF 做混合检索融合** | 只看排名天然归一化，向量分数（0-1）和 BM25 分数（无上界）量纲不同无需调参 | 加权求和（难调参） |
+| **Qdrant 嵌入式做向量库** | 免起服务 clone 即用，payload 过滤是代码 RAG 刚需，留 url 开关可伸缩 | faiss（无元数据过滤+要起服务） |
 
 ### 3.4 五大正交扩展机制
 
@@ -348,6 +352,26 @@ Actor 模型（如 Erlang/Akka）更强大，但：
 3. 文件系统方案更简单，够用
 
 YAGNI 原则——简单方案能解决就不要过度设计。
+
+### 4.5 "怎么给 Coding Agent 加语义代码搜索？"
+
+**回答框架**（详见阶段7）：
+
+**第一层：痛点**
+- 原本靠 Grep 关键词搜索，存在"词汇鸿沟"——用户说"登录鉴权"，代码叫 `verify_token`，搜不到
+
+**第二层：方案（RAG 完整链路）**
+- 索引：AST 按函数/类分块 → embedding → Qdrant 向量库
+- 检索：向量召回 Top-20 + BM25 关键词召回 Top-20 → RRF 融合 → Top-5
+
+**第三层：关键决策**
+- AST 分块（不是固定字符切）——保证语义完整
+- 混合检索（不是纯向量）——向量漏精确关键词，BM25 漏语义，RRF 融合取长补短
+- Qdrant 嵌入式（不是 faiss+服务）——免起服务，payload 过滤是代码 RAG 刚需
+- 增量索引（mtime+hash 两级）——不全量重建
+- 全链路降级——RAG 是增强不是依赖
+
+**追问"RRF 为什么不用加权求和"**：向量分数（0-1）和 BM25 分数（无上界）量纲不同，RRF 只看排名天然归一化，无需调参。详见阶段7 §11 Q3。
 
 ---
 
@@ -477,7 +501,7 @@ def check(self, tool, arguments) -> Decision:
 
 - 全项目类型标注（PEP 604 `X | Y` 语法）
 - Pydantic 自动参数校验
-- 17 个测试文件覆盖核心模块
+- 20 个测试文件覆盖核心模块与 RAG 链路（63 个测试用例）
 - LLM 异常全映射为内部异常（AuthenticationError/RateLimitError/NetworkError）
 - Hook 自动跑 linter（ruff check + ruff format）
 - dataclass + Enum 让数据结构清晰
@@ -765,7 +789,7 @@ A：在 12 个生命周期事件自动执行脚本。pre_tool_use 甚至能拒�
 
 ## 9. 速查手册：核心类型 + 核心流程
 
-### 9.1 15 个核心类型
+### 9.1 核心类型速查
 
 | 类型 | 文件 | 一句话 |
 |------|------|--------|
@@ -790,6 +814,16 @@ A：在 12 个生命周期事件自动执行脚本。pre_tool_use 甚至能拒�
 | `CompactBoundary` | context/manager.py | 压缩结果（summary + keep） |
 | `RecoveryState` | context/manager.py | 文件快照恢复 |
 | `MemoryManager` | memory/auto_memory.py | 自动记忆提取 |
+| **RAG 子系统（详见阶段7）** | | |
+| `EmbeddingProvider` | rag/embedding.py | embedding 抽象接口（策略模式） |
+| `cosine_similarity` | rag/embedding.py | 余弦相似度 |
+| `CodeChunk` | rag/chunker.py | 代码块（含稳定点 ID） |
+| `QdrantCodeStore` | rag/qdrant_store.py | Qdrant 向量存储（嵌入式/Server） |
+| `IncrementalIndexer` | rag/indexer.py | mtime+hash 两级增量索引 |
+| `BM25Index` | rag/bm25.py | 自实现 BM25 关键词召回 |
+| `reciprocal_rank_fusion` | rag/fusion.py | RRF 融合算法 |
+| `SemanticMemoryIndex` | memory/semantic_recall.py | 记忆语义检索（第一期） |
+| `CodeSearch` | tools/code_search.py | 语义代码搜索工具（第二期） |
 
 ### 9.2 6 条核心流程
 
@@ -835,6 +869,9 @@ A：在 12 个生命周期事件自动执行脚本。pre_tool_use 甚至能拒�
 - [ ] 手撕 Tool 基类、工具分区、Future 权限确认
 - [ ] 说出五大正交扩展机制各自解决的问题
 - [ ] 解释 RecoveryState 和断路器的作用
+- [ ] 讲清楚 RAG 完整链路（索引 + 检索），能推导余弦相似度/BM25/RRF 三个公式（阶段7）
+- [ ] 解释为什么 AST 分块、为什么混合检索、为什么 Qdrant 嵌入式（阶段7）
+- [ ] 手撕 cosine_similarity、RRF 融合、AST 分块（阶段7 §12）
 
 ### 9.5 面试时记住三句话
 

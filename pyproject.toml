@@ -21,6 +21,12 @@ dependencies = [
 rag = [
     "qdrant-client>=1.7.0",
 ]
+# 桌面/Web UI 扩展依赖。不装也能用项目原有全部 CLI/TUI 功能；
+# 装了则启用 codebot --web 模式，提供浏览器访问的图形界面。
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
 
 [project.scripts]
 codebot = "codebot.__main__:main"

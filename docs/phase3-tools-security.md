@@ -238,16 +238,18 @@ LLM 想用延迟工具时，需要先调用 `ToolSearch`：
 
 ### 3.4 ToolSearch 是怎么找到工具的？
 
-一个轻量级的关键词搜索引擎：
+默认是轻量级的关键词搜索引擎（`search_deferred`）：
 
 - 你搜 "team" → 匹配名称含 "team" 的工具给高分 → 匹配描述含 "team" 的给中等分 → 按分数排序返回
 - 支持 `select:ToolName` 精确选择
 - 不需要向量数据库，不需要语义搜索，正则 + 字符串匹配就够用
 
-**为什么不上语义搜索？** 因为：
-1. 工具数量少（20+ 个），关键词足够
+**RAG 第三期增强（可选）**：`ToolRegistry` 新增 `search_deferred_semantic` 方法——注入 `EmbeddingProvider` 后，用 embedding 余弦相似度匹配工具的 name+description，能跨越词汇鸿沟（搜 "build codebase" 匹配到 "CodeSearch"）。**关键设计：embedder 不可用时自动回退到关键词版**，零侵入、可降级。
+
+**为什么默认关键词、语义只作增强？** 因为：
+1. 工具数量少（20+ 个），关键词多数情况够用
 2. 语义搜索需要 embedding 模型，增加依赖和延迟
-3. 简单方案能解决问题就不要过度设计——YAGNI 原则
+3. 关键词是零依赖的保底方案，语义是锦上添花——符合项目"渐进式降级"哲学
 
 ---
 
@@ -345,6 +347,22 @@ Agent 可以跑任何 Shell 命令，但有多重保护：
 - Glob 用文件系统 API（快），Grep 用文件内容扫描（慢）
 - Glob 适合"找所有 .py 文件"，Grep 适合"找包含 TODO 的行"
 - 分开让 LLM 能精确表达意图，也方便各自优化
+
+### 4.6 CodeSearch — 语义代码搜索（RAG 第二期）
+
+和 Grep 并列注册，给 Agent 提供"按意思找代码"的能力——Grep 是关键词/正则精确匹配，CodeSearch 是语义检索。
+
+```
+LLM 调用：CodeSearch(query="处理用户登录鉴权的逻辑")
+返回：verify_token @ auth/token.py:42-58 (score 0.87)
+     AuthMiddleware @ middleware/auth.py:15-30 (score 0.81)
+```
+
+**为什么需要它？** 解决"词汇鸿沟"——用户说"登录鉴权"，代码叫 `verify_token`，Grep 搜不到。语义检索匹配"意思"不匹配"字面"。
+
+**完整链路**：query embedding → Qdrant 向量召回 Top-20 + BM25 关键词召回 Top-20 → RRF 融合 → Top-5。`category="read"` + `is_concurrency_safe=True`，可和 Grep 并发执行。
+
+**降级设计**：RAG 依赖（qdrant-client）/ embedding 不可用时，返回"请改用 Grep"提示，不阻塞主流程。详见阶段7。
 
 ---
 

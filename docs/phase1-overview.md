@@ -483,7 +483,8 @@ terminal-codebot/
 │   ├── memory/               # 🔥 记忆系统
 │   │   ├── auto_memory.py    # 自动记忆提取
 │   │   ├── session.py        # 会话管理
-│   │   ├── recall.py         # 记忆召回
+│   │   ├── recall.py         # 记忆召回（LLM 选择器 + 语义检索回退）
+│   │   ├── semantic_recall.py # 🔥 语义记忆检索（RAG 第一期，embedding 替代 LLM 选择器）
 │   │   └── instructions.py   # 指令持久化
 │   ├── permissions/          # 🔥 权限系统
 │   │   ├── checker.py        # 五层权限检查器
@@ -511,6 +512,7 @@ terminal-codebot/
 │   │   ├── bash.py           # 执行命令
 │   │   ├── glob.py           # 文件搜索
 │   │   ├── grep.py           # 内容搜索
+│   │   ├── code_search.py    # 🔥 语义代码搜索（RAG 第二期，向量+BM25+RRF 混合检索）
 │   │   ├── agent_tool.py     # 子 Agent 派发
 │   │   ├── load_skill.py     # 加载技能
 │   │   ├── task_*.py         # 任务管理（4个）
@@ -521,10 +523,18 @@ terminal-codebot/
 │   │   ├── setup.py          # 创建工作树
 │   │   ├── cleanup.py        # 自动清理
 │   │   └── changes.py        # 变更追踪
+│   ├── rag/                  # 🔥 RAG 检索增强生成子系统（详见阶段7）
+│   │   ├── embedding.py      # EmbeddingProvider 抽象 + cosine_similarity
+│   │   ├── chunker.py        # AST 代码分块（Python 按函数/类切）
+│   │   ├── qdrant_store.py   # Qdrant 向量库（嵌入式默认 + Server 可选）
+│   │   ├── indexer.py        # 增量索引（mtime+hash 两级判断）
+│   │   ├── bm25.py           # 自实现 BM25 关键词召回
+│   │   ├── fusion.py         # RRF 倒数排名融合
+│   │   └── reranker.py       # embedding 轻量重排
 │   └── styles.tcss           # TUI 样式文件（Textual CSS）
-├── tests/                    # 测试文件（17个）
-├── docs/                     # 项目文档（6个 phase + 1个 Vibe Coding）
-├── pyproject.toml            # 项目配置
+├── tests/                    # 测试文件（20个：17 核心 + 3 RAG）
+├── docs/                     # 项目文档（7 个 phase + RAG 方案 + 简历描述 + Vibe Coding）
+├── pyproject.toml            # 项目配置（含 [optional-dependencies] rag 组）
 └── README.md
 ```
 
@@ -532,9 +542,9 @@ terminal-codebot/
 
 记住这个口诀：
 
-> **app 管界面，agent 管循环，client 管模型，tools 管能力，permissions 管安全，memory 管记忆，context 管窗口**
+> **app 管界面，agent 管循环，client 管模型，tools 管能力，permissions 管安全，memory 管记忆，context 管窗口，rag 管检索**
 
-每个目录都是一个独立子系统，对应五层架构中的一层或多层。
+每个目录都是一个独立子系统，对应五层架构中的一层或多层。`rag/` 是横切"工具层 + 记忆层"的检索增强子系统——给 CodeSearch 工具提供语义搜索能力，给记忆召回提供 embedding 相似度能力（详见阶段7）。
 
 ---
 
@@ -549,6 +559,7 @@ terminal-codebot/
 | **OpenAI SDK** | 调 GPT 和 DeepSeek | 官方 SDK，生态最大，兼容服务最多 | - |
 | **Pydantic v2** | 数据校验 + Schema 生成 | 自动生成 JSON Schema（LLM function calling 刚需），Rust 内核快 | dataclass（无 Schema）、attrs |
 | **mcp** | 外部工具扩展 | 标准化协议，任何语言实现的 MCP Server 都能接入 | 自定义协议 |
+| **Qdrant** | 向量库（RAG） | Rust 内核 + 原生 payload 过滤 + 嵌入式免起服务 | faiss（无元数据过滤）、chromadb |
 | **PyYAML** | 读配置文件 | Python 生态标配，支持 `${VAR}` 解析 | TOML（无环境变量）、JSON（无注释） |
 | **HTTPX** | HTTP 客户端 | 支持异步，用于 MCP SSE 连接 | requests（同步）、aiohttp |
 | **uv** | 包管理 | Rust 实现，比 pip 快 10-100 倍 | pip、poetry |
@@ -601,6 +612,8 @@ Agent 应用的瓶颈是 **LLM API 延迟**（秒级），不是语言性能（�
 - **工厂函数**：读取配置中的 `protocol` 字段，自动选对应的客户端
 
 Agent 代码里只调用 `client.stream()`，完全不知道底层是哪个模型。
+
+**RAG 子系统复用了同样的思路**：`EmbeddingProvider`（`rag/embedding.py`）也是策略模式——抽象接口只有一个 `embed()` 方法，`OpenAIEmbedding` / `NullEmbedding` 是具体策略，`create_embedding_provider` 是工厂函数。embedding 不可用时降级为 `NullEmbedding`，上层 `is_available()` 判断后走回退路径。**同一套设计模式在不同场景复用，是架构一致性的体现。**
 
 ```python
 # client.py 的核心抽象

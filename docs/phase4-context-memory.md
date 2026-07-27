@@ -491,6 +491,25 @@ self._extracting = True
 
 **这是"幂等性"的设计**——即使触发多次，效果和触发一次一样。
 
+### 6.6 记忆召回的语义检索（RAG 第一期）
+
+`memory/recall.py::find_relevant_memories` 原本用 **LLM 选择器**挑记忆——每次都额外调一次 LLM，有延迟和成本，且只看 frontmatter description。`app.py::_prefetch_relevant_memories` 每轮都要等这个 side-query。
+
+**RAG 第一期改造**：新增 `memory/semantic_recall.py::SemanticMemoryIndex`，用 embedding 余弦相似度替代 LLM 选择器：
+
+| 维度 | LLM 选择器（原） | 语义检索（新，RAG 第一期） |
+|------|----------------|------------------------|
+| 延迟 | 2-3 秒（调 LLM） | 100ms（向量计算） |
+| 成本 | 每次消耗 token | 仅 embedding 费用（便宜 10x） |
+| 依据 | 只看 description | 看正文全文 |
+| 可解释 | 黑盒（LLM 决策） | 有相似度分数 |
+
+**接入方式**：`find_relevant_memories` 新增可选参数 `semantic_index`，优先走语义检索，失败/不可用/零命中时回退到 LLM 选择器——**向后兼容，渐进式降级**。
+
+**增量索引**：和 CodeSearch 同思路，mtime 粗筛 + hash 确认，只重新 embedding 变化的记忆。
+
+详见阶段7 §3。
+
 ---
 
 ## 7. 会话持久化
