@@ -1091,7 +1091,7 @@ def bm25_score(query_tokens, doc_tokens, doc_freqs, corpus_size, avgdl, k1=1.5, 
 
 ---
 
-> **下一步**：配合 `docs/rag-optimization-plan.md`（设计方案）阅读，再看 `codebot/rag/` 源码，每个模块对照测试文件验证理解。
+> **下一步**：配合 `docs/RAG优化方案.md`（设计方案）阅读，再看 `codebot/rag/` 源码，每个模块对照测试文件验证理解。
 >
 > **面试时记住**：先讲痛点（词汇鸿沟），再讲方案（混合检索），最后讲权衡（为什么不用 faiss/CrossEncoder）。展示工程判断力比堆技术名词更重要。
 >

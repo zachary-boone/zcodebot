@@ -1,6 +1,6 @@
 """Qdrant 向量存储（第二期 RAG）。
 
-Qdrant 选型的三个理由（详见 docs/rag-optimization-plan.md §8b）：
+Qdrant 选型的三个理由（详见 docs/RAG优化方案.md §8b）：
   1. payload 元数据过滤——能按 file/type 过滤，代码 RAG 刚需
   2. 稳定点 ID + upsert 做增量——改了的块覆盖，删了的块 delete_by_file
   3. COSINE 距离内置归一化——不用手算相似度

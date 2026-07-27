@@ -1,6 +1,6 @@
 """RAG（检索增强生成）子系统。
 
-按 docs/rag-optimization-plan.md 的分期路线图落地：
+按 docs/RAG优化方案.md 的分期路线图落地：
   - 第一期：记忆语义检索（memory/semantic_recall.py 复用本模块）
   - 第二期：语义 CodeSearch（tools/code_search.py + rag/qdrant_store.py）
   - 第三期：ToolSearch 语义增强 + 轻量重排（rag/reranker.py）

@@ -1,6 +1,6 @@
 """BM25 关键词召回（第二期 RAG 混合检索的关键词这一路）。
 
-为什么混合检索需要 BM25（详见 docs/rag-optimization-plan.md §6.3 决策二）：
+为什么混合检索需要 BM25（详见 docs/RAG优化方案.md §6.3 决策二）：
   - 纯向量检索会漏掉精确关键词（如变量名 user_id、函数名 verify_token）
   - 纯关键词漏语义（用户说"登录"，代码叫 verify_token）
   - 两路召回 + RRF 融合，取长补短

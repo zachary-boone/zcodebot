@@ -4,7 +4,7 @@
   - Grep：关键词/正则精确匹配（找变量名、精确字符串）
   - CodeSearch：语义检索（"找做登录鉴权的代码"——代码可能叫 verify_token）
 
-完整链路（详见 docs/rag-optimization-plan.md §6）：
+完整链路（详见 docs/RAG优化方案.md §6）：
   query → embedding → Qdrant 向量召回 Top-20 ─┐
        → BM25 关键词召回 Top-20 ──────────────┤→ RRF 融合 → Top-5 → 返回 LLM
                                                 ┘
