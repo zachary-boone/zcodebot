@@ -35,27 +35,6 @@ def main() -> None:
         default=None,
         help="Run non-interactively: execute the prompt and print the result to stdout",
     )
-    parser.add_argument(
-        "--web",
-        action="store_true",
-        help="Launch the web UI (browser-based) instead of the terminal TUI. Requires the 'web' extra: uv pip install -e '.[web]'",
-    )
-    parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Web UI bind host (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8765,
-        help="Web UI bind port (default: 8765)",
-    )
-    parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Do not auto-open the browser when --web is used",
-    )
     args = parser.parse_args()
 
     try:
@@ -79,10 +58,6 @@ def main() -> None:
         asyncio.run(_run_prompt(config, permission_mode, hook_engine, args.p))
         return
 
-    if args.web:
-        _run_web(config, permission_mode, hook_engine, host=args.host, port=args.port, open_browser=not args.no_browser)
-        return
-
     from codebot.app import CodeBotApp
     from codebot.driver import NoAltScreenDriver
 
@@ -99,52 +74,6 @@ def main() -> None:
         driver_class=NoAltScreenDriver,
     )
     app.run()
-
-
-def _run_web(config, permission_mode, hook_engine, host: str, port: int, open_browser: bool) -> None:
-    """启动 Web UI 模式：FastAPI 后端 + 浏览器前端。"""
-    try:
-        from codebot.server import create_app
-    except ImportError as e:
-        print(
-            f"Error: Web UI 依赖未安装。\n"
-            f"请运行: uv pip install -e '.[web]'\n"
-            f"或:    pip install -e '.[web]'\n"
-            f"原始错误: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    try:
-        import uvicorn
-    except ImportError:
-        print(
-            "Error: uvicorn 未安装。请运行: uv pip install -e '.[web]'",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    app = create_app(config, permission_mode, hook_engine)
-
-    url = f"http://{host}:{port}"
-    print(f"CodeBot Web UI 启动中...")
-    print(f"  地址: {url}")
-    print(f"  工作目录: {os.getcwd()}")
-    print(f"  权限模式: {permission_mode.value}")
-    print(f"  按 Ctrl+C 退出")
-    print()
-
-    if open_browser:
-        import threading
-        import webbrowser
-        # 延迟 1 秒打开浏览器，等服务起来
-        def _open():
-            import time
-            time.sleep(1.0)
-            webbrowser.open(url)
-        threading.Thread(target=_open, daemon=True).start()
-
-    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 async def _run_prompt(config, permission_mode, hook_engine, prompt: str) -> None:
