@@ -84,7 +84,11 @@ class CodeSearch(Tool):
             from codebot.rag.fusion import reciprocal_rank_fusion
             from codebot.rag.embedding import EmbeddingError
 
-            # 1. 增量更新索引（只重新索引变化的文件）
+            # 1. 等后台预热完成（如果启动时触发了预热且还没跑完）
+            #    避免和预热任务并发 rebuild 冲突。
+            await self._indexer.wait_for_warmup()
+
+            # 2. 增量更新索引（兜底：预热没覆盖到的变化，或预热失败的情况）
             await self._indexer.rebuild_if_needed()
 
             # 2. query embedding

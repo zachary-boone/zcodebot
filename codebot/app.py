@@ -1276,6 +1276,11 @@ class CodeBotApp(App):
             # 用带 indexer/embedder 的 CodeSearch 覆盖默认降级版
             code_search = CodeSearch(indexer=indexer, embedder=embedder)
             self.registry.register(code_search)
+
+            # 启动后台预热：在用户和 Agent 对话的间隙静默建索引，
+            # 用户第一次调 CodeSearch 时索引大概率已建好，消除 30-60 秒等待。
+            # 失败不影响主流程——execute 里有 rebuild_if_needed 兜底。
+            indexer.start_background_warmup()
         except Exception:
             # RAG 是增强，任何失败都不影响主流程
             pass

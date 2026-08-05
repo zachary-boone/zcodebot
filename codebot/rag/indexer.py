@@ -70,9 +70,44 @@ class IncrementalIndexer:
         from codebot.rag.bm25 import BM25Index
         self._bm25 = BM25Index()
         self._bm25_dirty = True  # 是否需要重建 BM25
+        # 后台预热任务引用。None 表示没有预热在跑；
+        # 不为 None 时表示后台正在 rebuild，execute 应等它而非自己再调。
+        self._warm_task: Any = None
 
     def is_available(self) -> bool:
         return self._store.is_available()
+
+    def is_warming(self) -> bool:
+        """后台预热是否还在跑。"""
+        return self._warm_task is not None and not self._warm_task.done()
+
+    async def wait_for_warmup(self) -> None:
+        """如果后台预热在跑，等它完成。已完成或没预热则立即返回。
+
+        供 CodeSearch.execute 在检索前调用——避免和后台预热并发 rebuild 冲突
+        （两个协程同时扫文件/embedding 会重复 + 可能写 Qdrant 冲突）。
+        """
+        if self._warm_task is not None and not self._warm_task.done():
+            try:
+                await self._warm_task
+            except Exception:
+                pass  # 预热失败不阻塞检索，execute 自己再调 rebuild 兜底
+        self._warm_task = None
+
+    def start_background_warmup(self) -> None:
+        """启动后台预热任务（不阻塞当前协程）。
+
+        在 app 启动后调用，让索引在用户和 Agent 对话的间隙静默构建。
+        用户第一次调 CodeSearch 时，索引大概率已建好——消除 30-60 秒等待。
+
+        如果已经在预热或索引已就绪，不重复启动。
+        """
+        if not self.is_available():
+            return
+        if self._warm_task is not None and not self._warm_task.done():
+            return  # 已在预热
+        import asyncio
+        self._warm_task = asyncio.ensure_future(self._warmup())
 
     def _load_meta(self) -> dict[str, FileIndexEntry]:
         if not self._meta_path.is_file():
@@ -196,6 +231,22 @@ class IncrementalIndexer:
         self._save_meta()
         self._bm25_dirty = False
         return stats
+
+    async def _warmup(self) -> None:
+        """后台预热实现：调 rebuild_if_needed 建索引，带日志。
+
+        任何异常都静默——预热失败不影响主流程，用户调 CodeSearch 时
+        execute 会再调一次 rebuild_if_needed 兜底。
+        """
+        try:
+            stats = await self.rebuild_if_needed()
+            total = stats["indexed"] + stats["skipped"]
+            log.info(
+                "RAG 后台预热完成：索引 %d 文件（新建/更新 %d，跳过 %d，删除 %d）",
+                total, stats["indexed"], stats["skipped"], stats["deleted"],
+            )
+        except Exception as e:
+            log.warning("RAG 后台预热失败（不影响主流程，检索时会兜底重试）: %s", e)
 
     def get_stats(self) -> dict[str, int]:
         """返回当前索引概况。"""
