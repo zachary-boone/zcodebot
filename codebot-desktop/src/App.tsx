@@ -10,22 +10,50 @@ import { ChatInput } from "./components/ChatInput";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { WorkDirDialog } from "./components/WorkDirDialog";
 
 export default function App() {
-  const { sendMessage, cancel, respondPermission, switchMode, switchSession } = useWebSocket();
+  const { sendMessage, cancel, respondPermission, switchMode, switchSession, newSession, setWorkDir } = useWebSocket();
   const isStreaming = useChatStore((s) => s.isStreaming);
   const engineStatus = useChatStore((s) => s.engineStatus);
   const pendingPermission = useChatStore((s) => s.pendingPermission);
+  const workDir = useChatStore((s) => s.workDir);
+  const errorMessage = useChatStore((s) => s.errorMessage);
   const reset = useChatStore((s) => s.reset);
   const initTheme = useThemeStore((s) => s.init);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [insertText, setInsertText] = useState<{ text: string; id: number } | null>(null);
+  // 工作目录切换对话框 + 切换中状态（后端重建 runtime 期间显示 loading）
+  const [workDirDialogOpen, setWorkDirDialogOpen] = useState(false);
+  const [workDirSwitching, setWorkDirSwitching] = useState(false);
 
   useEffect(() => {
     initTheme();
   }, [initTheme]);
+
+  // 后端重建完成后会发 workdir_changed，workDir 随之更新——
+  // 监听到变化就关闭对话框、清除 loading。注意 workDirSwitching 守卫
+  // 避免首次连接 workDir 从 null 变成实际路径时误触发关闭逻辑。
+  useEffect(() => {
+    if (workDirSwitching && workDir) {
+      setWorkDirSwitching(false);
+      setWorkDirDialogOpen(false);
+    }
+  }, [workDir, workDirSwitching]);
+
+  // 失败保护：后端路径校验失败 / 重建 runtime 报错时只发 error 不发 workdir_changed，
+  // 此时 switching 会一直卡在 true。监听 errorMessage 出现即清除 loading（保留对话框
+  // 让用户看到错误并修改路径重试）。同时加 25s 超时兜底防止永久卡死。
+  useEffect(() => {
+    if (!workDirSwitching) return;
+    if (errorMessage) {
+      setWorkDirSwitching(false);
+    }
+    const timer = setTimeout(() => setWorkDirSwitching(false), 25000);
+    return () => clearTimeout(timer);
+  }, [workDirSwitching, errorMessage]);
 
   const disabled = engineStatus !== "ready";
 
@@ -104,7 +132,8 @@ export default function App() {
 ## 提示
 
 - 点击侧栏会话可切换历史会话
-- 侧栏"文件"标签可浏览项目文件，点击插入 @引用`,
+- 侧栏"文件"标签可浏览项目文件，点击插入 @引用
+- 顶部状态栏点击文件夹图标可**切换工作目录**，引擎会在新目录下重建（会话按目录隔离）`,
             thinking: "",
             toolCalls: [],
             status: "complete" as const,
@@ -116,9 +145,29 @@ export default function App() {
     sendMessage(text);
   };
 
-  const handleNewSession = useCallback(() => reset(), [reset]);
+  const handleNewSession = useCallback(() => {
+    reset();
+    newSession();
+  }, [reset, newSession]);
   const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
   const handleCloseSidebar = useCallback(() => setSidebarOpen(false), []);
+
+  // 切换工作目录：打开自定义路径输入对话框（不使用 Electron 原生 dialog，
+  // 因为在禁用 GPU 加速的环境下 dialog.showOpenDialog 会触发渲染崩溃）。
+  // 用户在对话框里输入/粘贴绝对路径并确认后，再发 set_workdir 给后端。
+  const handleSwitchWorkDir = useCallback(() => {
+    setWorkDirDialogOpen(true);
+  }, []);
+
+  // 对话框确认：发 WS set_workdir，进入 switching 状态等后端重建。
+  // 后端回 workdir_changed 后上面的 useEffect 会清除 switching 并关闭对话框。
+  const handleConfirmWorkDir = useCallback(
+    (path: string) => {
+      setWorkDirSwitching(true);
+      setWorkDir(path);
+    },
+    [setWorkDir]
+  );
 
   // 全局快捷键
   useEffect(() => {
@@ -128,7 +177,7 @@ export default function App() {
       const key = e.key.toLowerCase();
       if (key === "n") {
         e.preventDefault();
-        reset();
+        handleNewSession();
       } else if (key === "b") {
         e.preventDefault();
         setSidebarOpen((v) => !v);
@@ -142,7 +191,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [reset]);
+  }, [handleNewSession]);
 
   return (
     <div className="flex h-screen">
@@ -166,7 +215,7 @@ export default function App() {
             <Menu size={16} />
           </button>
         )}
-        <StatusBar onSwitchMode={switchMode} />
+        <StatusBar onSwitchMode={switchMode} onSwitchWorkDir={handleSwitchWorkDir} />
         <MessageList />
         <ChatInput
           onSend={handleSend}
@@ -185,6 +234,16 @@ export default function App() {
         <SettingsPanel
           onClose={() => setSettingsOpen(false)}
           onSwitchMode={(m) => switchMode(m)}
+        />
+      )}
+      {workDirDialogOpen && (
+        <WorkDirDialog
+          currentWorkDir={workDir}
+          switching={workDirSwitching}
+          onClose={() => {
+            if (!workDirSwitching) setWorkDirDialogOpen(false);
+          }}
+          onConfirm={handleConfirmWorkDir}
         />
       )}
     </div>

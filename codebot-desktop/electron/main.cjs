@@ -1,8 +1,15 @@
 // Electron 主进程入口
 // 职责：1) spawn Python FastAPI sidecar  2) 创建窗口  3) 退出时清理 sidecar
-const { app, BrowserWindow } = require("electron");
+//       4) 提供 IPC：原生目录选择器（供前端"切换工作目录"使用）
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+
+// 无 GPU / 虚拟机 / 远程环境下 GPU 进程会反复崩溃导致 electron 无法启动，
+// 禁用硬件加速 + no-sandbox 绕过（必须在 app ready 之前调用）。
+// 这些开关只影响渲染层的图形加速，不影响 CodeBot 的核心功能。
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch("no-sandbox");
 
 // 项目根（codebot-desktop 的上一级）。打包后用 process.resourcesPath
 const isPackaged = app.isPackaged;
@@ -39,7 +46,10 @@ function spawnSidecar() {
   sidecar.on("exit", (code) => console.log(`[sidecar] exited with code ${code}`));
 }
 
-async function waitForServer(timeoutMs = 15000) {
+async function waitForServer(timeoutMs = 40000) {
+  // sidecar 首次启动需要加载 config / 连 MCP / 初始化 runtime，可能较慢，
+  // 给 40s 余量避免误报超时（即便超时 sidecar 仍可能在后台继续启动，
+  // 前端 WS 有重连机制能后续接上）。
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -62,7 +72,7 @@ async function createWindow() {
     backgroundColor: "#1a1b26",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -79,6 +89,19 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // 原生目录选择器：渲染进程通过 ipcRenderer.invoke('dialog:openDirectory') 调用
+  // 返回选中目录的绝对路径字符串；用户取消返回空串。切工作目录时复用此能力。
+  ipcMain.handle("dialog:openDirectory", async (_event, opts) => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    const result = await dialog.showOpenDialog(win, {
+      title: (opts && opts.title) || "选择工作目录",
+      message: (opts && opts.message) || "选择一个新的工作目录，引擎将在此目录下重建",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (result.canceled || result.filePaths.length === 0) return "";
+    return result.filePaths[0];
+  });
+
   spawnSidecar();
   try {
     await waitForServer();

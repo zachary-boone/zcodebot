@@ -9,11 +9,15 @@ interface ChatStore {
   engineStatus: "disconnected" | "initializing" | "ready" | "error";
   engineInfo: { provider: string; model: string; permission_mode: string } | null;
   errorMessage: string | null;
+  // 当前工作目录：由后端 engine_ready / workdir_changed 推送；
+  // 切换工作目录会重建 runtime 并清空会话，前端据此刷新侧栏与文件树。
+  workDir: string | null;
 
   // 动作
   setEngineStatus: (s: ChatStore["engineStatus"]) => void;
   setEngineInfo: (info: ChatStore["engineInfo"]) => void;
   updatePermissionMode: (mode: string) => void;
+  setWorkDir: (dir: string | null) => void;
   addUserMessage: (text: string) => void;
   startAssistantMessage: () => string; // 返回消息 id
   appendStreamText: (msgId: string, text: string) => void;
@@ -38,6 +42,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   engineStatus: "disconnected",
   engineInfo: null,
   errorMessage: null,
+  workDir: null,
 
   setEngineStatus: (s) => set({ engineStatus: s }),
   setEngineInfo: (info) => set({ engineInfo: info }),
@@ -45,6 +50,7 @@ export const useChatStore = create<ChatStore>((set) => ({
     set((state) => ({
       engineInfo: state.engineInfo ? { ...state.engineInfo, permission_mode: mode } : null,
     })),
+  setWorkDir: (dir) => set({ workDir: dir }),
   addUserMessage: (text) =>
     set((state) => ({
       messages: [

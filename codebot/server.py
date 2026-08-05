@@ -143,6 +143,9 @@ class SessionConnection:
         # request_id -> future；future 由 agent 创建在 PermissionRequest.future 上，
         # 但我们用 request_id 关联前端响应。这里存 request_id -> PermissionRequest。
         self.pending_permissions: dict[str, PermissionRequest] = {}
+        self.session_manager: Any = None
+        self.session: Any = None
+        self.history_cursor = 0
 
     async def send_json(self, data: dict[str, Any]) -> None:
         try:
@@ -171,8 +174,33 @@ class SessionConnection:
                             "tool_name": event.tool_name,
                             "description": event.description,
                         })
+                    elif isinstance(event, CompactNotification):
+                        if self.session and event.boundary is not None:
+                            from codebot.memory.session import make_compact_boundary
+                            record = make_compact_boundary(
+                                event.boundary.summary, event.boundary.keep
+                            )
+                            self.session.append_record(record)
+                            self.history_cursor = len(self.runtime.conversation.history)
+                        await self.send_json(event_to_dict(event))
+                    elif isinstance(event, TurnComplete):
+                        self.persist_history_since_cursor()
+                        await self.send_json(event_to_dict(event))
+                    elif isinstance(event, LoopComplete):
+                        self.persist_history_since_cursor()
+                        if self.session:
+                            self.session.meta.total_tokens = (
+                                self.runtime.agent.total_input_tokens
+                                + self.runtime.agent.total_output_tokens
+                            )
+                            self.session.meta.save(
+                                self.session._sessions_dir
+                                / f"{self.session.session_id}.meta"
+                            )
+                        await self.send_json(event_to_dict(event))
                     else:
                         await self.send_json(event_to_dict(event))
+                self.persist_history_since_cursor()
                 # run() 正常结束
                 await self.send_json({"type": "done"})
             except asyncio.CancelledError:
@@ -208,6 +236,13 @@ class SessionConnection:
         req.future.set_result(resp)
         return True
 
+    def persist_history_since_cursor(self) -> None:
+        if not self.session:
+            return
+        for msg in self.runtime.conversation.history[self.history_cursor:]:
+            self.session.append(msg)
+        self.history_cursor = len(self.runtime.conversation.history)
+
 
 # 全局 runtime 引用（ws_chat 里 set，REST 接口里用）
 global_runtime: Runtime | None = None
@@ -229,6 +264,22 @@ app.add_middleware(
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/workdir")
+async def get_workdir() -> dict[str, str]:
+    """返回当前工作目录。
+
+    桌面端启动时由 sidecar 的 cwd 决定（PROJECT_ROOT）；
+    运行中可通过 WS 的 set_workdir 消息切换，切换后此处返回新路径。
+    优先用 global_runtime.work_dir（显式追踪），否则回退到 os.getcwd()。
+    """
+    work_dir = (
+        global_runtime.work_dir
+        if global_runtime and getattr(global_runtime, "work_dir", "")
+        else os.getcwd()
+    )
+    return {"work_dir": work_dir}
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +348,55 @@ async def read_file_content(path: str) -> PlainTextResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取失败: {e}")
     return PlainTextResponse(text)
+
+
+@app.get("/api/browse")
+async def browse_directory(path: str = "") -> dict:
+    """浏览文件系统目录，供桌面端"切换工作目录"对话框可视化选择。
+
+    与 /api/files 不同：
+    - 不受 work_dir 沙箱限制，可浏览任意绝对路径（切换工作目录本来就该去任意目录）
+    - 只返回目录（选工作目录只需目录），隐藏以 . 开头的隐藏目录
+    返回当前路径、上级路径、子目录列表、主目录、Windows 盘符。
+    """
+    if not path:
+        path = getattr(global_runtime, "work_dir", "") or os.getcwd()
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"路径不存在: {target}")
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="不是目录")
+
+    dirs: list[dict[str, str]] = []
+    try:
+        children = list(target.iterdir())
+    except (PermissionError, OSError):
+        children = []
+    for p in sorted(children, key=lambda x: x.name.lower()):
+        try:
+            # 隐藏目录（.git/.venv 等）不显示，避免列表被刷屏
+            if p.is_dir() and not p.name.startswith("."):
+                dirs.append({"name": p.name, "path": str(p)})
+        except OSError:
+            continue
+
+    parent = str(target.parent) if target.parent != target else ""
+    home = str(Path.home())
+    drives: list[str] = []
+    if sys.platform == "win32":
+        import string as _string
+        for letter in _string.ascii_uppercase:
+            d = f"{letter}:\\"
+            if Path(d).exists():
+                drives.append(d)
+
+    return {
+        "path": str(target),
+        "parent": parent,
+        "dirs": dirs,
+        "home": home,
+        "drives": drives,
+    }
 
 
 @app.get("/api/config")
@@ -500,7 +600,12 @@ async def ws_chat(websocket: WebSocket) -> None:
       {type: "send_message", text: "..."}
       {type: "permission_response", request_id: "...", decision: "allow|deny|allow_always"}
       {type: "cancel"}
+      {type: "switch_mode", mode: "..."}
+      {type: "switch_session", session_id: "..."}
+      {type: "new_session"}
+      {type: "set_workdir", path: "..."}   # 切换工作目录，重建 runtime
     后端 → 前端：见 event_to_dict + permission_request + done/cancelled/error
+                            + workdir_changed + engine_ready（带 work_dir）
     """
     await websocket.accept()
 
@@ -541,9 +646,12 @@ async def ws_chat(websocket: WebSocket) -> None:
         "provider": runtime.provider.name,
         "model": runtime.provider.model,
         "permission_mode": permission_mode.value,
+        "work_dir": runtime.work_dir,
     }))
 
     conn = SessionConnection(websocket, runtime)
+    from codebot.memory.session import SessionManager
+    conn.session_manager = SessionManager(runtime.work_dir or os.getcwd())
 
     try:
         while True:
@@ -562,9 +670,14 @@ async def ws_chat(websocket: WebSocket) -> None:
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
-                # 把用户消息加入会话
-                from codebot.conversation import Message
+                if conn.session is None and conn.session_manager is not None:
+                    conn.session = conn.session_manager.create()
+                    runtime.agent.session_id = conn.session.session_id
+                    runtime.agent._loop_count = 0
+                    runtime.agent.clear_active_skills()
+
                 runtime.conversation.add_user_message(text)
+                conn.history_cursor = len(runtime.conversation.history)
                 await conn.run_agent(text)
             elif mtype == "permission_response":
                 req_id = msg.get("request_id", "")
@@ -591,9 +704,82 @@ async def ws_chat(websocket: WebSocket) -> None:
                 if result is None:
                     await conn.send_json({"type": "error", "message": f"会话不存在: {session_id}"})
                 else:
-                    # 用恢复的消息替换当前 conversation 历史
-                    runtime.conversation.history = result.messages
+                    if conn.session:
+                        conn.session.close()
+                    conn.session = result.session
+                    runtime.agent.session_id = conn.session.session_id
+                    runtime.agent._loop_count = 0
+                    runtime.conversation.replace_history(result.messages)
+                    conn.history_cursor = len(runtime.conversation.history)
                     await conn.send_json({"type": "session_switched", "session_id": session_id})
+            elif mtype == "new_session":
+                conn.cancel_agent()
+                if conn.session:
+                    conn.session.close()
+                    conn.session = None
+                    runtime.agent.session_id = ""
+                    runtime.agent._loop_count = 0
+                    runtime.agent.clear_active_skills()
+                runtime.conversation.replace_history([])
+                conn.history_cursor = 0
+                await conn.send_json({"type": "new_session_ready"})
+            elif mtype == "set_workdir":
+                new_path = msg.get("path", "").strip()
+                if not new_path:
+                    await conn.send_json({"type": "error", "message": "未提供工作目录路径"})
+                    continue
+                target = Path(new_path).expanduser().resolve()
+                if not target.exists():
+                    await conn.send_json({"type": "error", "message": f"路径不存在: {target}"})
+                    continue
+                if not target.is_dir():
+                    await conn.send_json({"type": "error", "message": f"不是目录: {target}"})
+                    continue
+                # 1) 取消运行中的 agent，避免切换时仍有任务在跑
+                conn.cancel_agent()
+                # 2) 关闭旧 session（会话属于旧 work_dir，留在旧目录的 .codebot/sessions/）
+                if conn.session:
+                    try:
+                        conn.session.close()
+                    except Exception:
+                        pass
+                    conn.session = None
+                # 3) 切换进程 cwd，让用 os.getcwd() 的 REST 接口（/api/files 等）同步生效
+                try:
+                    os.chdir(str(target))
+                except OSError as e:
+                    await conn.send_json({"type": "error", "message": f"切换目录失败: {e}"})
+                    continue
+                # 4) 重建 runtime：agent / sandbox / instructions / worktree / agent_loader 都绑定 work_dir
+                #    用旧 runtime 当前的权限模式（用户可能已通过 switch_mode 切换过），避免重建后回退到配置默认值
+                current_mode = runtime.permission_checker.mode
+                try:
+                    runtime = await build_runtime(
+                        config, current_mode, hook_engine, work_dir=str(target)
+                    )
+                except Exception as e:
+                    logger.exception("rebuild runtime on workdir change failed")
+                    await conn.send_json({"type": "error", "message": f"重建引擎失败: {e}"})
+                    continue
+                global_runtime = runtime
+                conn.runtime = runtime
+                # 5) 重置 session_manager 与 conversation，让新 work_dir 从干净状态开始
+                from codebot.memory.session import SessionManager
+                conn.session_manager = SessionManager(str(target))
+                conn.history_cursor = 0
+                runtime.conversation.replace_history([])
+                runtime.agent.session_id = ""
+                runtime.agent._loop_count = 0
+                runtime.agent.clear_active_skills()
+                # 6) 通知前端：先 workdir_changed，再 engine_ready（带新 work_dir）让前端重置 UI
+                await conn.send_json({"type": "workdir_changed", "work_dir": str(target)})
+                await conn.send_json({
+                    "type": "engine_ready",
+                    "provider": runtime.provider.name,
+                    "model": runtime.provider.model,
+                    "permission_mode": current_mode.value,
+                    "work_dir": runtime.work_dir,
+                })
             else:
                 await conn.send_json({"type": "error", "message": f"未知消息类型: {mtype}"})
     except WebSocketDisconnect:
@@ -602,6 +788,8 @@ async def ws_chat(websocket: WebSocket) -> None:
         logger.exception("ws handler error")
     finally:
         conn.cancel_agent()
+        if conn.session:
+            conn.session.close()
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,9 @@ export function useWebSocket() {
   const shouldReconnect = useRef(true);
 
   const store = useChatStore();
+  const notifySessionsChanged = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("codebot:sessions-changed"));
+  }, []);
 
   const handleMessage = useCallback(
     (msg: ServerMessage) => {
@@ -27,6 +30,11 @@ export function useWebSocket() {
             model: msg.model,
             permission_mode: msg.permission_mode,
           });
+          // 后端在首次 ready 与切换工作目录重建后会发 engine_ready；
+          // work_dir 可选字段，存在时同步到 store 供 UI 显示。
+          if (msg.work_dir) {
+            store.setWorkDir(msg.work_dir);
+          }
           break;
         case "stream_text":
           if (currentAssistantId.current) {
@@ -82,6 +90,7 @@ export function useWebSocket() {
             currentAssistantId.current = null;
           }
           store.setStreaming(false);
+          notifySessionsChanged();
           break;
         case "cancelled":
           if (currentAssistantId.current) {
@@ -89,12 +98,27 @@ export function useWebSocket() {
             currentAssistantId.current = null;
           }
           store.setStreaming(false);
+          notifySessionsChanged();
           break;
         case "mode_changed":
           store.updatePermissionMode(msg.mode);
           break;
         case "session_switched":
           // 会话已在后端切换，前端清空当前消息（历史由 REST 加载）
+          break;
+        case "new_session_ready":
+          store.setError(null);
+          break;
+        case "workdir_changed":
+          // 工作目录已切换：后端会紧接着发 engine_ready 重建 UI 状态。
+          // 这里先清空当前会话消息与挂起的权限请求（它们属于旧 work_dir），
+          // 并刷新 store 的 workDir，让侧栏 / 文件树 / 状态栏立即反映新目录。
+          store.setWorkDir(msg.work_dir);
+          store.setPendingPermission(null);
+          store.setStreaming(false);
+          useChatStore.setState({ messages: [] });
+          // 通知侧栏重新拉取会话列表（新 work_dir 下的 .codebot/sessions/）
+          notifySessionsChanged();
           break;
         case "error":
           if (currentAssistantId.current) {
@@ -115,7 +139,7 @@ export function useWebSocket() {
           break;
       }
     },
-    [store]
+    [store, notifySessionsChanged]
   );
 
   const connect = useCallback(() => {
@@ -201,6 +225,20 @@ export function useWebSocket() {
     [send]
   );
 
+  const newSession = useCallback(() => {
+    send({ type: "new_session" });
+  }, [send]);
+
+  const setWorkDir = useCallback(
+    (path: string) => {
+      // 切换工作目录：后端会取消运行中的 agent、关闭旧 session、os.chdir、
+      // 重建 runtime，然后回 workdir_changed + engine_ready。前端只需发出请求，
+      // 真正的状态更新在 handleMessage 的 workdir_changed 分支里完成。
+      send({ type: "set_workdir", path });
+    },
+    [send]
+  );
+
   useEffect(() => {
     shouldReconnect.current = true;
     connect();
@@ -212,5 +250,5 @@ export function useWebSocket() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { sendMessage, cancel, respondPermission, switchMode, switchSession, ws: wsRef };
+  return { sendMessage, cancel, respondPermission, switchMode, switchSession, newSession, setWorkDir, ws: wsRef };
 }

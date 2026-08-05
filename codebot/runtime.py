@@ -38,6 +38,9 @@ class Runtime:
     trace_manager: Any
     hook_engine: HookEngine | None
     config: AppConfig
+    # 当前工作目录。CLI 用 os.getcwd()；桌面版可在运行时通过 server.set_workdir 切换。
+    # 重建 runtime 时此字段会被刷新，REST 接口与 WS 都依赖它定位文件 / 会话 / memory。
+    work_dir: str = ""
     # pending permission requests: request_id(str) -> asyncio.Future
     # 由 server.py 填充并管理；CLI 不用
     pending_permissions: dict[str, Any] = field(default_factory=dict)
@@ -157,4 +160,5 @@ async def build_runtime(
         trace_manager=trace_manager,
         hook_engine=hook_engine,
         config=config,
+        work_dir=work_dir,
     )

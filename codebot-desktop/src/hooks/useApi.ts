@@ -33,6 +33,29 @@ export interface SkillItem {
   source: string;
 }
 
+// /api/browse 目录浏览结果（切换工作目录对话框用）
+export interface BrowseResult {
+  path: string;
+  parent: string;
+  dirs: Array<{ name: string; path: string }>;
+  home: string;
+  drives: string[];
+}
+
+export async function browseDirectory(path: string): Promise<BrowseResult> {
+  const res = await fetch(`${API_BASE}/browse?path=${encodeURIComponent(path)}`);
+  if (!res.ok) {
+    let detail = "浏览目录失败";
+    try {
+      detail = (await res.json()).detail || detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export async function fetchSessions(): Promise<SessionMeta[]> {
   const res = await fetch(`${API_BASE}/sessions`);
   if (!res.ok) throw new Error("加载会话失败");

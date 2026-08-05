@@ -62,6 +62,12 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    const onSessionsChanged = () => refresh();
+    window.addEventListener("codebot:sessions-changed", onSessionsChanged);
+    return () => window.removeEventListener("codebot:sessions-changed", onSessionsChanged);
+  }, [refresh]);
+
   const handleDelete = async (id: string) => {
     if (!confirm("确认删除此会话？")) return;
     const ok = await deleteSession(id);
