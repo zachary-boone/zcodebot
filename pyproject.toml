@@ -21,9 +21,16 @@ dependencies = [
 rag = [
     "qdrant-client>=1.7.0",
 ]
+# 桌面版桥接服务依赖：启用 Electron 桌面前端的 FastAPI sidecar
+# 安装：uv pip install -e ".[desktop]"
+desktop = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+]
 
 [project.scripts]
 codebot = "codebot.__main__:main"
+codebot-server = "codebot.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["codebot"]

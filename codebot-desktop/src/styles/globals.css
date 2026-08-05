@@ -1,0 +1,131 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 深色主题（参考 Codex/WorkBuddy 风格） */
+:root,
+.dark {
+  --bg-primary: #1a1b26;
+  --bg-secondary: #24283b;
+  --bg-tertiary: #16161e;
+  --bg-message: #2d3142;
+  --bg-input: #1f2335;
+  --text-primary: #c0caf5;
+  --text-secondary: #9aa5ce;
+  --text-tertiary: #565f89;
+  --accent: #7aa2f7;
+  --border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* 浅色主题 */
+.light {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-tertiary: #fafafa;
+  --bg-message: #e8eaf0;
+  --bg-input: #ffffff;
+  --text-primary: #1a1b26;
+  --text-secondary: #4c505e;
+  --text-tertiary: #8b8fa3;
+  --accent: #3b6fd4;
+  --border-color: rgba(0, 0, 0, 0.08);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* 流式光标动画 */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.stream-cursor::after {
+  content: "▊";
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--accent);
+  animation: blink 1s infinite;
+}
+
+/* markdown 内部样式 */
+.markdown-body {
+  font-size: 14px;
+  line-height: 1.7;
+}
+.markdown-body p {
+  margin: 0 0 0.75em;
+}
+.markdown-body pre {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+.markdown-body code {
+  font-family: "JetBrains Mono", Consolas, Menlo, monospace;
+  font-size: 13px;
+}
+.markdown-body :not(pre) > code {
+  background: rgba(122, 162, 247, 0.12);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+}
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.markdown-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+.markdown-body blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 0.75em 0;
+  padding: 0.25em 0 0.25em 1em;
+  color: var(--text-secondary);
+}
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border-color);
+  padding: 6px 12px;
+}

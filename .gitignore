@@ -10,3 +10,20 @@ build/
 .mewcode/
 .claude/
 CLAUDE.md
+
+# 桌面版前端（Electron + React）
+codebot-desktop/node_modules/
+codebot-desktop/dist/
+codebot-desktop/dist-electron/
+codebot-desktop/.vite/
+
+# CodeBot 运行时产物
+.codebot/sessions/
+.codebot/debug.log
+.codebot/history
+
+# WorkBuddy 工作区记忆（本地，不提交）
+.workbuddy/
+
+# 本机启动脚本（含硬编码路径，不提交）
+bin/codebot.cmd
