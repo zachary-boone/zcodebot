@@ -40,6 +40,20 @@ export async function deleteSession(id: string): Promise<boolean> {
   return data.deleted;
 }
 
+export interface SessionMessage {
+  role: string;
+  content: string;
+  thinking?: string;
+  tool_uses?: Array<{ tool_name: string; tool_id: string; arguments: Record<string, unknown> }>;
+}
+
+export async function fetchSessionMessages(id: string): Promise<SessionMessage[]> {
+  const res = await fetch(`${API_BASE}/sessions/${id}/messages`);
+  if (!res.ok) throw new Error("加载会话消息失败");
+  const data = await res.json();
+  return data.messages;
+}
+
 export async function fetchMemory(): Promise<MemoryItem[]> {
   const res = await fetch(`${API_BASE}/memory`);
   if (!res.ok) throw new Error("加载 memory 失败");

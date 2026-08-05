@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Menu } from "lucide-react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useChatStore } from "./store/chatStore";
 import { useThemeStore } from "./store/themeStore";
+import { fetchSessionMessages } from "./hooks/useApi";
 import { StatusBar } from "./components/StatusBar";
 import { MessageList } from "./components/MessageList";
 import { ChatInput } from "./components/ChatInput";
@@ -11,7 +12,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 
 export default function App() {
-  const { sendMessage, cancel, respondPermission, switchMode } = useWebSocket();
+  const { sendMessage, cancel, respondPermission, switchMode, switchSession } = useWebSocket();
   const isStreaming = useChatStore((s) => s.isStreaming);
   const engineStatus = useChatStore((s) => s.engineStatus);
   const pendingPermission = useChatStore((s) => s.pendingPermission);
@@ -20,6 +21,7 @@ export default function App() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inputInsert, setInputInsert] = useState<string | null>(null);
 
   useEffect(() => {
     initTheme();
@@ -27,15 +29,48 @@ export default function App() {
 
   const disabled = engineStatus !== "ready";
 
+  // 切换会话：清空当前消息，从 REST 加载历史，发 WS 让后端也切
+  const handleSwitchSession = useCallback(async (sessionId: string) => {
+    reset();
+    try {
+      const msgs = await fetchSessionMessages(sessionId);
+      // 用历史消息填充 store
+      useChatStore.setState((state) => {
+        const chatMsgs = msgs.map((m) => ({
+          id: `hist-${m.role}-${Math.random().toString(36).slice(2, 8)}`,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          thinking: m.thinking || "",
+          toolCalls: (m.tool_uses || []).map((tu) => ({
+            tool_id: tu.tool_id,
+            tool_name: tu.tool_name,
+            arguments: tu.arguments,
+            status: "complete" as const,
+          })),
+          status: "complete" as const,
+        }));
+        return { messages: chatMsgs };
+      });
+    } catch (e) {
+      console.error("load session messages failed", e);
+    }
+    switchSession(sessionId);
+  }, [reset, switchSession]);
+
+  // 文件树点击：插入 @path 到输入框
+  const handleInsertFile = useCallback((path: string) => {
+    setInputInsert(`@${path} `);
+    // 清空触发器（ChatInput 消费后重置）
+    setTimeout(() => setInputInsert(null), 100);
+  }, []);
+
   const handleSend = (text: string) => {
-    // 前端拦截部分命令
     const trimmed = text.trim();
     if (trimmed === "/clear") {
       reset();
       return;
     }
     if (trimmed === "/help") {
-      // 注入一条帮助消息到消息列表
       useChatStore.setState((state) => ({
         messages: [
           ...state.messages,
@@ -59,13 +94,17 @@ export default function App() {
 |--------|------|
 | \`Enter\` | 发送消息 |
 | \`Shift+Enter\` | 换行 |
+| \`Ctrl+N\` | 新会话 |
+| \`Ctrl+B\` | 切换侧栏 |
+| \`Ctrl+L\` | 清空对话 |
+| \`Ctrl+,\` | 打开设置 |
 | \`@\` | 引用文件（补全） |
 | \`/\` | 斜杠命令（补全） |
 
 ## 提示
 
-- 点击状态栏可切换权限模式和主题
-- 侧栏可查看历史会话、记忆笔记、已安装技能`,
+- 点击侧栏会话可切换历史会话
+- 侧栏"文件"标签可浏览项目文件，点击插入 @引用`,
             thinking: "",
             toolCalls: [],
             status: "complete" as const,
@@ -77,27 +116,48 @@ export default function App() {
     sendMessage(text);
   };
 
+  // 全局快捷键
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // 只在 Ctrl 组合键时处理
+      if (!e.ctrlKey && !e.metaKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "n") {
+        e.preventDefault();
+        reset();
+      } else if (key === "b") {
+        e.preventDefault();
+        setSidebarOpen((v) => !v);
+      } else if (key === "l") {
+        e.preventDefault();
+        reset();
+      } else if (key === ",") {
+        e.preventDefault();
+        setSettingsOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [reset]);
+
   return (
     <div className="flex h-screen">
-      {/* 侧栏 */}
       {sidebarOpen && (
         <Sidebar
-          onNewSession={() => {
-            reset();
-          }}
+          onNewSession={() => reset()}
           onOpenSettings={() => setSettingsOpen(true)}
           onClose={() => setSidebarOpen(false)}
+          onSwitchSession={handleSwitchSession}
+          onInsertFile={handleInsertFile}
         />
       )}
 
-      {/* 主区 */}
-      <div className="flex flex-col flex-1 min-w-0">
-        {/* 侧栏开关（侧栏关闭时显示） */}
+      <div className="flex flex-col flex-1 min-w-0 relative">
         {!sidebarOpen && (
           <button
             onClick={() => setSidebarOpen(true)}
             className="absolute top-2 left-2 z-30 p-1.5 rounded-lg bg-bg-secondary border border-border text-text-tertiary hover:text-text-secondary transition-colors"
-            title="打开侧栏"
+            title="打开侧栏 (Ctrl+B)"
           >
             <Menu size={16} />
           </button>
@@ -109,6 +169,7 @@ export default function App() {
           onCancel={cancel}
           isStreaming={isStreaming}
           disabled={disabled}
+          insertText={inputInsert}
         />
       </div>
 
@@ -118,9 +179,7 @@ export default function App() {
       {settingsOpen && (
         <SettingsPanel
           onClose={() => setSettingsOpen(false)}
-          onSwitchMode={(m) => {
-            switchMode(m);
-          }}
+          onSwitchMode={(m) => switchMode(m)}
         />
       )}
     </div>

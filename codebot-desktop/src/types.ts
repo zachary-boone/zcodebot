@@ -41,6 +41,7 @@ export type ServerMessage =
   | { type: "done" }
   | { type: "cancelled" }
   | { type: "mode_changed"; mode: string }
+  | { type: "session_switched"; session_id: string }
   | {
       type: "hook";
       hook_id: string;
@@ -54,7 +55,8 @@ export type ClientMessage =
   | { type: "send_message"; text: string }
   | { type: "permission_response"; request_id: string; decision: "allow" | "deny" | "allow_always" }
   | { type: "cancel" }
-  | { type: "switch_mode"; mode: string };
+  | { type: "switch_mode"; mode: string }
+  | { type: "switch_session"; session_id: string };
 
 // 前端 store 里一条消息（由多个事件聚合而成）
 export interface ChatMessage {

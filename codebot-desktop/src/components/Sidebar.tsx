@@ -9,6 +9,7 @@ import {
   Settings as SettingsIcon,
   ChevronDown,
   ChevronRight,
+  Folder,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -21,17 +22,22 @@ import {
   type SessionMeta,
   type MemoryItem,
   type SkillItem,
+  type FileEntry,
 } from "../hooks/useApi";
 
-type Tab = "sessions" | "memory" | "skills";
+const API_BASE = "http://127.0.0.1:7800/api";
+
+type Tab = "sessions" | "memory" | "skills" | "files";
 
 interface Props {
   onNewSession: () => void;
   onOpenSettings: () => void;
   onClose: () => void;
+  onSwitchSession: (sessionId: string) => void;
+  onInsertFile: (path: string) => void;
 }
 
-export function Sidebar({ onNewSession, onOpenSettings, onClose }: Props) {
+export function Sidebar({ onNewSession, onOpenSettings, onClose, onSwitchSession, onInsertFile }: Props) {
   const [tab, setTab] = useState<Tab>("sessions");
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
@@ -88,6 +94,7 @@ export function Sidebar({ onNewSession, onOpenSettings, onClose }: Props) {
       <div className="flex border-b border-border">
         {[
           { key: "sessions" as Tab, icon: MessageSquare, label: "会话" },
+          { key: "files" as Tab, icon: Folder, label: "文件" },
           { key: "memory" as Tab, icon: Brain, label: "记忆" },
           { key: "skills" as Tab, icon: Package, label: "技能" },
         ].map(({ key, icon: Icon, label }) => (
@@ -129,6 +136,7 @@ export function Sidebar({ onNewSession, onOpenSettings, onClose }: Props) {
                 {items.map((s) => (
                   <div
                     key={s.id}
+                    onClick={() => onSwitchSession(s.id)}
                     className="group flex items-start gap-2 px-2 py-1.5 rounded-lg hover:bg-bg-tertiary transition-colors cursor-pointer"
                   >
                     <MessageSquare size={12} className="mt-0.5 text-text-tertiary flex-shrink-0" />
@@ -222,6 +230,10 @@ export function Sidebar({ onNewSession, onOpenSettings, onClose }: Props) {
             ))}
           </div>
         )}
+
+        {tab === "files" && (
+          <FileTree onInsertFile={onInsertFile} />
+        )}
       </div>
 
       {/* 底部：设置 */}
@@ -234,6 +246,114 @@ export function Sidebar({ onNewSession, onOpenSettings, onClose }: Props) {
           设置
         </button>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 文件树组件
+// ---------------------------------------------------------------------------
+
+interface FileNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children?: FileNode[];
+  loaded?: boolean;
+}
+
+function FileTree({ onInsertFile }: { onInsertFile: (path: string) => void }) {
+  const [tree, setTree] = useState<FileNode[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+
+  const loadDir = useCallback(async (dirPath: string): Promise<FileNode[]> => {
+    try {
+      const res = await fetch(`${API_BASE}/files?path=${encodeURIComponent(dirPath)}&max_depth=1`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.entries as FileEntry[])
+        .sort((a, b) => {
+          // 目录在前，再按名字
+          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        })
+        .map((e) => ({
+          name: e.name,
+          path: dirPath ? `${dirPath}/${e.path}` : e.path,
+          is_dir: e.is_dir,
+        }));
+    } catch {
+      return [];
+    }
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    loadDir("").then((nodes) => {
+      setTree(nodes);
+      setLoading(false);
+    });
+  }, [loadDir]);
+
+  const toggleDir = async (node: FileNode) => {
+    const newExpanded = new Set(expanded);
+    if (expanded.has(node.path)) {
+      newExpanded.delete(node.path);
+    } else {
+      newExpanded.add(node.path);
+      if (!node.loaded) {
+        const children = await loadDir(node.path);
+        node.children = children;
+        node.loaded = true;
+        setTree([...tree]);
+      }
+    }
+    setExpanded(newExpanded);
+  };
+
+  const renderNode = (node: FileNode, depth: number) => {
+    const pad = { paddingLeft: `${depth * 12 + 8}px` };
+    if (node.is_dir) {
+      const isExpanded = expanded.has(node.path);
+      return (
+        <div key={node.path}>
+          <button
+            onClick={() => toggleDir(node)}
+            style={pad}
+            className="w-full flex items-center gap-1 py-1 pr-2 rounded hover:bg-bg-tertiary transition-colors text-left"
+          >
+            {isExpanded ? <ChevronDown size={11} className="text-text-tertiary" /> : <ChevronRight size={11} className="text-text-tertiary" />}
+            <span className="text-amber-400 text-xs">▸</span>
+            <span className="text-xs text-text-secondary truncate">{node.name}</span>
+          </button>
+          {isExpanded && node.children && (
+            <div>
+              {node.children.map((child) => renderNode(child, depth + 1))}
+            </div>
+          )}
+        </div>
+      );
+    }
+    return (
+      <button
+        key={node.path}
+        onClick={() => onInsertFile(node.path)}
+        style={pad}
+        className="w-full flex items-center gap-1 py-1 pr-2 rounded hover:bg-bg-tertiary transition-colors text-left group"
+      >
+        <span className="w-[11px]" />
+        <span className="text-blue-400 text-xs">▤</span>
+        <span className="text-xs text-text-secondary truncate group-hover:text-text-primary">{node.name}</span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="px-1 pb-2">
+      {loading && <div className="text-center text-text-tertiary text-xs py-4">加载中...</div>}
+      {!loading && tree.length === 0 && <div className="text-center text-text-tertiary text-xs py-8">无文件</div>}
+      {tree.map((node) => renderNode(node, 0))}
     </div>
   );
 }

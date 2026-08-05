@@ -377,6 +377,35 @@ async def delete_session(session_id: str) -> dict:
     return {"deleted": ok}
 
 
+@app.get("/api/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str) -> dict:
+    """加载某个会话的历史消息（供前端切换会话时回显）。"""
+    from codebot.memory.session import SessionManager
+    sm = SessionManager(os.getcwd())
+    result = sm.resume(session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = []
+    for m in result.messages:
+        msg = {
+            "role": m.role,
+            "content": m.content,
+        }
+        if m.thinking_blocks:
+            msg["thinking"] = "\n".join(tb.thinking for tb in m.thinking_blocks)
+        if m.tool_uses:
+            msg["tool_uses"] = [
+                {"tool_name": tu.tool_name, "tool_id": tu.tool_id, "arguments": tu.arguments}
+                for tu in m.tool_uses
+            ]
+        messages.append(msg)
+    return {
+        "session_id": session_id,
+        "messages": messages,
+        "last_active": result.last_active.isoformat(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Memory 笔记 REST
 # ---------------------------------------------------------------------------
@@ -553,6 +582,18 @@ async def ws_chat(websocket: WebSocket) -> None:
                     await conn.send_json({"type": "mode_changed", "mode": new_mode.value})
                 except ValueError:
                     await conn.send_json({"type": "error", "message": f"未知权限模式: {mode_str}"})
+            elif mtype == "switch_session":
+                # 切换会话：加载历史消息到 conversation
+                session_id = msg.get("session_id", "")
+                from codebot.memory.session import SessionManager
+                sm = SessionManager(os.getcwd())
+                result = sm.resume(session_id)
+                if result is None:
+                    await conn.send_json({"type": "error", "message": f"会话不存在: {session_id}"})
+                else:
+                    # 用恢复的消息替换当前 conversation 历史
+                    runtime.conversation.history = result.messages
+                    await conn.send_json({"type": "session_switched", "session_id": session_id})
             else:
                 await conn.send_json({"type": "error", "message": f"未知消息类型: {mtype}"})
     except WebSocketDisconnect:
@@ -569,11 +610,16 @@ async def ws_chat(websocket: WebSocket) -> None:
 
 def main() -> None:
     Path(".codebot").mkdir(parents=True, exist_ok=True)
+    # 尝试写文件日志，失败则降级到纯 stderr（避免被 IDE 锁住 debug.log 启动失败）
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    try:
+        handlers.insert(0, logging.FileHandler(".codebot/debug.log", mode="a", encoding="utf-8"))
+    except PermissionError:
+        pass
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        filename=".codebot/debug.log",
-        filemode="a",
+        handlers=handlers,
     )
     # 同时输出到 stderr 方便 sidecar 调试
     logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))

@@ -1,7 +1,7 @@
 // 单条消息渲染：区分 user / assistant
 import { memo, useState } from "react";
 import { StreamingMarkdown } from "streaming-markdown-react";
-import { ChevronRight, ChevronDown, Check, AlertCircle, Loader } from "lucide-react";
+import { ChevronRight, ChevronDown, Check, AlertCircle, Loader, Copy } from "lucide-react";
 import type { ChatMessage } from "../types";
 import { ToolCallBlock } from "./ToolCallBlock";
 
@@ -70,12 +70,38 @@ function MessageBubbleBase({ message }: Props) {
       )}
 
       {/* 底部信息 */}
-      {message.status === "complete" && message.usage && (
-        <div className="mt-2 text-xs text-text-tertiary">
-          {message.usage.input_tokens + message.usage.output_tokens} tokens
+      {message.status === "complete" && (
+        <div className="mt-2 flex items-center gap-3">
+          {message.usage && (
+            <span className="text-xs text-text-tertiary">
+              {message.usage.input_tokens + message.usage.output_tokens} tokens
+            </span>
+          )}
+          <CopyButton text={message.content} />
         </div>
       )}
     </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
+  if (!text) return null;
+  return (
+    <button
+      onClick={handleCopy}
+      className="text-text-tertiary hover:text-text-secondary transition-colors"
+      title="复制消息"
+    >
+      {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+    </button>
   );
 }
 

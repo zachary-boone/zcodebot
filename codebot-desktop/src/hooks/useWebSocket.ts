@@ -93,6 +93,9 @@ export function useWebSocket() {
         case "mode_changed":
           store.updatePermissionMode(msg.mode);
           break;
+        case "session_switched":
+          // 会话已在后端切换，前端清空当前消息（历史由 REST 加载）
+          break;
         case "error":
           if (currentAssistantId.current) {
             store.completeMessage(currentAssistantId.current, "error");
@@ -191,6 +194,13 @@ export function useWebSocket() {
     [send]
   );
 
+  const switchSession = useCallback(
+    (sessionId: string) => {
+      send({ type: "switch_session", session_id: sessionId });
+    },
+    [send]
+  );
+
   useEffect(() => {
     shouldReconnect.current = true;
     connect();
@@ -202,5 +212,5 @@ export function useWebSocket() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { sendMessage, cancel, respondPermission, switchMode, ws: wsRef };
+  return { sendMessage, cancel, respondPermission, switchMode, switchSession, ws: wsRef };
 }

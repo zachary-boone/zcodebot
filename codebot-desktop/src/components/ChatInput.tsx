@@ -25,9 +25,10 @@ interface Props {
   onCancel: () => void;
   isStreaming: boolean;
   disabled: boolean;
+  insertText?: string | null;
 }
 
-export function ChatInput({ onSend, onCancel, isStreaming, disabled }: Props) {
+export function ChatInput({ onSend, onCancel, isStreaming, disabled, insertText }: Props) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -48,6 +49,21 @@ export function ChatInput({ onSend, onCancel, isStreaming, disabled }: Props) {
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   }, [text]);
+
+  // 外部插入文本（文件树点击）
+  useEffect(() => {
+    if (insertText) {
+      setText((prev) => prev + insertText);
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          const pos = ta.value.length;
+          ta.setSelectionRange(pos, pos);
+        }
+      });
+    }
+  }, [insertText]);
 
   // 检测 @ 或 / 触发补全
   useEffect(() => {
