@@ -11,6 +11,13 @@ export interface SessionMeta {
   last_active: string;
 }
 
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
+
 export interface MemoryItem {
   filename: string;
   scope: "user" | "project";

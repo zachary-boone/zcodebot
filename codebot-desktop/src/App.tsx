@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Menu } from "lucide-react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useChatStore } from "./store/chatStore";
@@ -21,7 +21,7 @@ export default function App() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [inputInsert, setInputInsert] = useState<string | null>(null);
+  const [insertText, setInsertText] = useState<{ text: string; id: number } | null>(null);
 
   useEffect(() => {
     initTheme();
@@ -57,11 +57,11 @@ export default function App() {
     switchSession(sessionId);
   }, [reset, switchSession]);
 
-  // 文件树点击：插入 @path 到输入框
+  // 文件树点击：插入 @path 到输入框（用递增 id 触发，避免 setTimeout 竞态）
+  const insertIdRef = useRef(0);
   const handleInsertFile = useCallback((path: string) => {
-    setInputInsert(`@${path} `);
-    // 清空触发器（ChatInput 消费后重置）
-    setTimeout(() => setInputInsert(null), 100);
+    insertIdRef.current += 1;
+    setInsertText({ text: `@${path} `, id: insertIdRef.current });
   }, []);
 
   const handleSend = (text: string) => {
@@ -116,6 +116,10 @@ export default function App() {
     sendMessage(text);
   };
 
+  const handleNewSession = useCallback(() => reset(), [reset]);
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
+  const handleCloseSidebar = useCallback(() => setSidebarOpen(false), []);
+
   // 全局快捷键
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -144,9 +148,9 @@ export default function App() {
     <div className="flex h-screen">
       {sidebarOpen && (
         <Sidebar
-          onNewSession={() => reset()}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onClose={() => setSidebarOpen(false)}
+          onNewSession={handleNewSession}
+          onOpenSettings={handleOpenSettings}
+          onClose={handleCloseSidebar}
           onSwitchSession={handleSwitchSession}
           onInsertFile={handleInsertFile}
         />
@@ -169,7 +173,8 @@ export default function App() {
           onCancel={cancel}
           isStreaming={isStreaming}
           disabled={disabled}
-          insertText={inputInsert}
+          insertText={insertText?.text}
+          insertId={insertText?.id}
         />
       </div>
 

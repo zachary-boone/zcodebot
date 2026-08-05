@@ -1,5 +1,5 @@
 // 侧栏：会话列表 + Memory 笔记 + Skills + 设置入口
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, memo } from "react";
 import {
   Plus,
   MessageSquare,
@@ -37,7 +37,7 @@ interface Props {
   onInsertFile: (path: string) => void;
 }
 
-export function Sidebar({ onNewSession, onOpenSettings, onClose, onSwitchSession, onInsertFile }: Props) {
+export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onClose, onSwitchSession, onInsertFile }: Props) {
   const [tab, setTab] = useState<Tab>("sessions");
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
@@ -248,7 +248,7 @@ export function Sidebar({ onNewSession, onOpenSettings, onClose, onSwitchSession
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // 文件树组件
@@ -319,7 +319,10 @@ function FileTree({ onInsertFile }: { onInsertFile: (path: string) => void }) {
       return (
         <div key={node.path}>
           <button
-            onClick={() => toggleDir(node)}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleDir(node);
+            }}
             style={pad}
             className="w-full flex items-center gap-1 py-1 pr-2 rounded hover:bg-bg-tertiary transition-colors text-left"
           >
@@ -338,7 +341,10 @@ function FileTree({ onInsertFile }: { onInsertFile: (path: string) => void }) {
     return (
       <button
         key={node.path}
-        onClick={() => onInsertFile(node.path)}
+        onClick={(e) => {
+          e.stopPropagation();
+          onInsertFile(node.path);
+        }}
         style={pad}
         className="w-full flex items-center gap-1 py-1 pr-2 rounded hover:bg-bg-tertiary transition-colors text-left group"
       >

@@ -1,6 +1,7 @@
 // 输入框：Enter 发送，Shift+Enter 换行，@ 文件引用补全，/ 命令补全，流式时显示停止按钮
 import { useRef, useEffect, useState, useCallback } from "react";
 import { Send, Square } from "lucide-react";
+import type { FileEntry } from "../hooks/useApi";
 
 const API_BASE = "http://127.0.0.1:7800/api";
 
@@ -14,21 +15,16 @@ const SLASH_COMMANDS = [
   { cmd: "/compact", desc: "压缩上下文" },
 ];
 
-interface FileEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-}
-
 interface Props {
   onSend: (text: string) => void;
   onCancel: () => void;
   isStreaming: boolean;
   disabled: boolean;
-  insertText?: string | null;
+  insertText?: string;
+  insertId?: number;
 }
 
-export function ChatInput({ onSend, onCancel, isStreaming, disabled, insertText }: Props) {
+export function ChatInput({ onSend, onCancel, isStreaming, disabled, insertText, insertId }: Props) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -50,9 +46,9 @@ export function ChatInput({ onSend, onCancel, isStreaming, disabled, insertText 
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   }, [text]);
 
-  // 外部插入文本（文件树点击）
+  // 外部插入文本（文件树点击，用 insertId 触发避免重复）
   useEffect(() => {
-    if (insertText) {
+    if (insertText && insertId !== undefined) {
       setText((prev) => prev + insertText);
       requestAnimationFrame(() => {
         const ta = textareaRef.current;
@@ -63,7 +59,8 @@ export function ChatInput({ onSend, onCancel, isStreaming, disabled, insertText 
         }
       });
     }
-  }, [insertText]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertId]);
 
   // 检测 @ 或 / 触发补全
   useEffect(() => {
