@@ -35,6 +35,13 @@ def main() -> None:
         default=None,
         help="Run non-interactively: execute the prompt and print the result to stdout",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Web serving mode (textual serve): use plain platform driver, "
+        "skip NoAltScreenDriver's extra ANSI sequences that interfere with "
+        "the textual-serve protocol handshake.",
+    )
     args = parser.parse_args()
 
     try:
@@ -59,7 +66,20 @@ def main() -> None:
         return
 
     from codebot.app import CodeBotApp
-    from codebot.driver import NoAltScreenDriver
+
+    if args.web:
+        # Web serving (textual serve) 子进程环境：使用纯净的平台 driver，
+        # 避免 NoAltScreenDriver 去除 alt-screen / 写空行等额外 ANSI 序列
+        # 干扰 textual_serve 的终端协议握手。
+        if sys.platform == "win32":
+            from textual.drivers.windows_driver import WindowsDriver
+            driver_class = WindowsDriver
+        else:
+            from textual.drivers.linux_driver import LinuxDriver
+            driver_class = LinuxDriver
+    else:
+        from codebot.driver import NoAltScreenDriver
+        driver_class = NoAltScreenDriver
 
     app = CodeBotApp(
         providers=config.providers,
@@ -71,7 +91,7 @@ def main() -> None:
         worktree_config=config.worktree,
         teammate_mode=config.teammate_mode,
         enable_coordinator_mode=config.enable_coordinator_mode,
-        driver_class=NoAltScreenDriver,
+        driver_class=driver_class,
     )
     app.run()
 
