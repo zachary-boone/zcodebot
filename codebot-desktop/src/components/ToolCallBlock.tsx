@@ -1,7 +1,7 @@
 // 工具调用块：可折叠，显示工具名/状态/输入参数/输出结果
 // 按工具类型区分渲染：写文件类用 diff 视图，Bash 用终端样式
 import { memo, useState, useEffect } from "react";
-import ReactDiffViewer, { DiffMethod } from "react-diff-viewer-continued";
+import ReactDiffViewer from "react-diff-viewer-continued";
 import { ChevronRight, ChevronDown, Check, AlertCircle, Loader, FileEdit, Terminal, FileSearch, Folder } from "lucide-react";
 import type { ToolCall } from "../types";
 
@@ -102,7 +102,6 @@ function ToolCallBlockBase({ tool }: Props) {
                     newValue={newContent}
                     splitView={false}
                     hideLineNumbers={false}
-                    diffMethod={DiffMethod.WORDS}
                     useDarkTheme={true}
                     styles={{
                       variables: {

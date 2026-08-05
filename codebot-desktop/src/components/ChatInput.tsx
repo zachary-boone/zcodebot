@@ -65,11 +65,13 @@ export function ChatInput({ onSend, onCancel, isStreaming, disabled }: Props) {
       fetchFiles(atMatch[1]);
       return;
     }
-    // / 命令补全：行首的 /
-    const slashMatch = before.match(/(^|\s)\/(\w*)$/);
+    // / 命令补全：行首或空格后的 /
+    const slashMatch = before.match(/(^|\s)(\/\w*)$/);
     if (slashMatch) {
+      // slashMatch[2] 是 "/help" 这样的完整串（含 /）
+      // slashPos 指向 / 本身的位置，insertCmd 时 before 切到 / 之前，替换整个 /xxx
       setSlashPos(pos - slashMatch[2].length);
-      const q = slashMatch[2].toLowerCase();
+      const q = slashMatch[2].slice(1).toLowerCase(); // 去掉 / 做过滤
       const filtered = SLASH_COMMANDS.filter((c) => c.cmd.toLowerCase().includes(q));
       setCmdList(filtered.length ? filtered : SLASH_COMMANDS);
       setShowCmdComplete(true);

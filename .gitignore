@@ -16,6 +16,9 @@ codebot-desktop/node_modules/
 codebot-desktop/dist/
 codebot-desktop/dist-electron/
 codebot-desktop/.vite/
+codebot-desktop/release/
+codebot-desktop/tsconfig.tsbuildinfo
+codebot-desktop/*.timestamp-*.mjs
 
 # CodeBot 运行时产物
 .codebot/sessions/

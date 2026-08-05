@@ -4,10 +4,22 @@ const { app, BrowserWindow } = require("electron");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-// 项目根（codebot-desktop 的上一级）
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-// Python venv 解释器
-const PYTHON_EXE = path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe");
+// 项目根（codebot-desktop 的上一级）。打包后用 process.resourcesPath
+const isPackaged = app.isPackaged;
+const PROJECT_ROOT = isPackaged
+  ? process.resourcesPath
+  : path.resolve(__dirname, "..", "..");
+
+// Python venv 解释器（开发模式用项目 .venv，打包模式用 extraResources 里的 .venv）
+const PYTHON_EXE = isPackaged
+  ? path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+  : path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe");
+
+// codebot 包路径（打包后在 resources/codebot）
+const CODEBOT_DIR = isPackaged
+  ? path.join(PROJECT_ROOT, "codebot")
+  : path.join(PROJECT_ROOT, "codebot");
+
 // FastAPI server 端口
 const SERVER_PORT = 7800;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;

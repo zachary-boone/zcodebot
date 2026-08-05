@@ -338,6 +338,130 @@ async def switch_mode(mode: str) -> dict:
     return {"mode": new_mode.value}
 
 
+# ---------------------------------------------------------------------------
+# 会话管理 REST
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sessions")
+async def list_sessions() -> dict:
+    """列出所有会话（按 last_active 降序）。"""
+    if not global_runtime:
+        raise HTTPException(status_code=503, detail="引擎未就绪")
+    from codebot.memory.session import SessionManager
+    sm = SessionManager(os.getcwd())
+    sessions = sm.list()
+    # 按 last_active 降序
+    sessions.sort(key=lambda s: s.last_active, reverse=True)
+    return {
+        "sessions": [
+            {
+                "id": s.id,
+                "title": s.title,
+                "summary": s.summary,
+                "message_count": s.message_count,
+                "total_tokens": s.total_tokens,
+                "created_at": s.created_at.isoformat(),
+                "last_active": s.last_active.isoformat(),
+            }
+            for s in sessions
+        ]
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict:
+    """删除会话。"""
+    from codebot.memory.session import SessionManager
+    sm = SessionManager(os.getcwd())
+    ok = sm.delete(session_id)
+    return {"deleted": ok}
+
+
+# ---------------------------------------------------------------------------
+# Memory 笔记 REST
+# ---------------------------------------------------------------------------
+
+@app.get("/api/memory")
+async def list_memory() -> dict:
+    """列出所有 memory 笔记（user + project）。"""
+    from codebot.memory.recall import scan_memory_files
+    from codebot.memory.auto_memory import MemoryManager
+    work_dir = os.getcwd()
+    home = Path.home()
+    # user memory：~/.codebot/memory/
+    user_dir = home / ".codebot" / "memory"
+    # project memory：<work_dir>/.codebot/memory/
+    proj_dir = Path(work_dir) / ".codebot" / "memory"
+    memories = []
+    if user_dir.exists():
+        memories.extend(scan_memory_files(user_dir, "user"))
+    if proj_dir.exists():
+        memories.extend(scan_memory_files(proj_dir, "project"))
+    return {
+        "memories": [
+            {
+                "filename": m.filename,
+                "scope": m.scope,
+                "description": m.description,
+                "type": m.type,
+                "age": _age_text(m.mtime_ms),
+                "content": _read_memory_body(m.file_path),
+            }
+            for m in memories
+        ]
+    }
+
+
+def _age_text(mtime_ms: int) -> str:
+    """简化的年龄文本。"""
+    import time as _time
+    days = (int(_time.time() * 1000) - mtime_ms) // 86_400_000
+    if days <= 0:
+        return "今天"
+    if days == 1:
+        return "昨天"
+    if days < 30:
+        return f"{days} 天前"
+    return f"{days // 30} 个月前"
+
+
+def _read_memory_body(file_path: str) -> str:
+    """读 memory 文件正文（跳过 frontmatter）。"""
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        # 去掉 YAML frontmatter
+        if text.startswith("---"):
+            end = text.find("---", 3)
+            if end > 0:
+                return text[end + 3 :].strip()
+        return text.strip()
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Skills 列表 REST
+# ---------------------------------------------------------------------------
+
+@app.get("/api/skills")
+async def list_skills() -> dict:
+    """列出已安装的 skills。"""
+    if not global_runtime:
+        raise HTTPException(status_code=503, detail="引擎未就绪")
+    work_dir = os.getcwd()
+    home = Path.home()
+    from codebot.skills.loader import SkillLoader
+    loader = SkillLoader(work_dir)
+    loader.load_all()
+    skills = []
+    for name, desc in loader.get_catalog():
+        skills.append({
+            "name": name,
+            "description": desc,
+            "source": loader.get_source_label(name),
+        })
+    return {"skills": skills}
+
 
 @app.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
@@ -402,6 +526,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                 continue
 
             mtype = msg.get("type")
+            if mtype == "ping":
+                # 心跳，静默忽略
+                continue
             if mtype == "send_message":
                 text = msg.get("text", "").strip()
                 if not text:

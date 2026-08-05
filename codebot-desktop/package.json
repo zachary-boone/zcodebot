@@ -4,12 +4,14 @@
   "description": "CodeBot 桌面版 - Electron + React 前端",
   "private": true,
   "type": "module",
-  "main": "dist-electron/main.js",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "dev:electron": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "start": "electron ."
+    "start": "electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
   },
   "dependencies": {
     "lucide-react": "^0.460.0",
@@ -26,10 +28,60 @@
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
     "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
     "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.codebot.desktop",
+    "productName": "CodeBot",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CodeBot"
+    },
+    "extraResources": [
+      {
+        "from": "../.venv",
+        "to": ".venv",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "../codebot",
+        "to": "codebot"
+      },
+      {
+        "from": "../.codebot",
+        "to": ".codebot"
+      }
+    ]
   }
 }

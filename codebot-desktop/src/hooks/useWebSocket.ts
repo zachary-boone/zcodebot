@@ -122,8 +122,16 @@ export function useWebSocket() {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
+    // 心跳：30s 发 ping，保持连接
+    const pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping" }));
+      }
+    }, 30000);
+
     ws.onopen = () => {
       console.log("[ws] connected");
+      store.setEngineStatus("initializing");
     };
     ws.onmessage = (e) => {
       try {
@@ -135,6 +143,7 @@ export function useWebSocket() {
     };
     ws.onclose = () => {
       console.log("[ws] closed");
+      clearInterval(pingTimer);
       wsRef.current = null;
       store.setEngineStatus("disconnected");
       if (shouldReconnect.current) {
