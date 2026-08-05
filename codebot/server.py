@@ -247,6 +247,10 @@ class SessionConnection:
 # 全局 runtime 引用（ws_chat 里 set，REST 接口里用）
 global_runtime: Runtime | None = None
 
+# 当前活动的 WebSocket 连接（ws_chat 里 set/清理，REST 接口如 delete_session
+# 需要操作它——例如删除活动会话前先关闭文件句柄）
+global_conn: "SessionConnection | None" = None
+
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -470,10 +474,40 @@ async def list_sessions() -> dict:
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict:
-    """删除会话。"""
+    """删除会话。
+
+    如果删除的是当前活动会话，先关闭它的文件句柄再删——Windows 上被
+    打开的文件无法 unlink（否则 PermissionError 导致删除失败），同时让
+    前端重置为干净会话。
+    """
+    global global_conn
+    if (
+        global_conn is not None
+        and global_conn.session is not None
+        and global_conn.session.session_id == session_id
+    ):
+        try:
+            global_conn.session.close()
+        except Exception:
+            pass
+        global_conn.session = None
+        global_conn.history_cursor = 0
+        global_conn.runtime.agent.session_id = ""
+        global_conn.runtime.agent._loop_count = 0
+        try:
+            global_conn.runtime.agent.clear_active_skills()
+        except Exception:
+            pass
+        global_conn.runtime.conversation.replace_history([])
+        await global_conn.send_json({"type": "new_session_ready"})
+
     from codebot.memory.session import SessionManager
     sm = SessionManager(os.getcwd())
-    ok = sm.delete(session_id)
+    try:
+        ok = sm.delete(session_id)
+    except OSError as e:
+        logger.warning("delete session %s failed: %s", session_id, e)
+        ok = False
     return {"deleted": ok}
 
 
@@ -485,25 +519,34 @@ async def get_session_messages(session_id: str) -> dict:
     result = sm.resume(session_id)
     if result is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    messages = []
-    for m in result.messages:
-        msg = {
-            "role": m.role,
-            "content": m.content,
+    try:
+        messages = []
+        for m in result.messages:
+            msg = {
+                "role": m.role,
+                "content": m.content,
+            }
+            if m.thinking_blocks:
+                msg["thinking"] = "\n".join(tb.thinking for tb in m.thinking_blocks)
+            if m.tool_uses:
+                msg["tool_uses"] = [
+                    {"tool_name": tu.tool_name, "tool_id": tu.tool_id, "arguments": tu.arguments}
+                    for tu in m.tool_uses
+                ]
+            messages.append(msg)
+        return {
+            "session_id": session_id,
+            "messages": messages,
+            "last_active": result.last_active.isoformat(),
         }
-        if m.thinking_blocks:
-            msg["thinking"] = "\n".join(tb.thinking for tb in m.thinking_blocks)
-        if m.tool_uses:
-            msg["tool_uses"] = [
-                {"tool_name": tu.tool_name, "tool_id": tu.tool_id, "arguments": tu.arguments}
-                for tu in m.tool_uses
-            ]
-        messages.append(msg)
-    return {
-        "session_id": session_id,
-        "messages": messages,
-        "last_active": result.last_active.isoformat(),
-    }
+    finally:
+        # 关键：resume() 会以追加模式打开 jsonl 并封装进 session，这里只读历史
+        # 不续写，用完必须关闭——否则文件句柄泄漏，Windows 上该会话文件会被
+        # 本进程持续占用，之后删除永远失败（PermissionError WinError 5）。
+        try:
+            result.session.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +696,10 @@ async def ws_chat(websocket: WebSocket) -> None:
     from codebot.memory.session import SessionManager
     conn.session_manager = SessionManager(runtime.work_dir or os.getcwd())
 
+    # 记录为全局活动连接，供 REST 接口（delete_session 等）操作
+    global global_conn
+    global_conn = conn
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -787,6 +834,12 @@ async def ws_chat(websocket: WebSocket) -> None:
     except Exception as e:
         logger.exception("ws handler error")
     finally:
+        # 清理全局连接引用（如果还是本连接）。
+        # 注意：不要在此处重复写 `global global_conn`——CPython 编译器对
+        # finally 嵌套块里的 global 声明有处理怪癖，会报 SyntaxError；
+        # 函数上方已声明过一次，整个函数作用域内均视为全局。
+        if global_conn is conn:
+            global_conn = None
         conn.cancel_agent()
         if conn.session:
             conn.session.close()

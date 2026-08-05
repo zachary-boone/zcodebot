@@ -15,9 +15,18 @@ export function MessageList() {
     endRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
   };
 
-  // 流式时自动滚动到底部
+  // 流式时自动滚动到底部。
+  // 流式期间用 auto（瞬时定位）：smooth 在持续收到新内容时每次都要重新
+  // 启动滚动动画，帧率低会感觉卡顿；流式结束后的首次定位用 smooth 收尾。
+  const wasStreaming = useRef(false);
   useEffect(() => {
-    if (isStreaming) scrollToBottom(true);
+    if (isStreaming) {
+      endRef.current?.scrollIntoView({ behavior: "auto" });
+      wasStreaming.current = true;
+    } else if (wasStreaming.current) {
+      wasStreaming.current = false;
+      endRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, isStreaming]);
 
   // 检测是否需要显示"滚动到底部"按钮

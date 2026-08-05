@@ -12,6 +12,7 @@ import {
   Folder,
   RefreshCw,
   X,
+  AlertCircle,
 } from "lucide-react";
 import {
   fetchSessions,
@@ -44,6 +45,12 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [expandedMem, setExpandedMem] = useState<string | null>(null);
+  // 待删除确认的会话。不用 window.confirm()——原生模态对话框在无 GPU / 沙箱的
+  // Electron 环境会同步阻塞渲染进程且不返回，导致整个界面卡死、输入栏无法输入、
+  // 删除请求发不出去。改用应用内 HTML 确认弹层。
+  const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -69,9 +76,30 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
   }, [refresh]);
 
   const handleDelete = async (id: string) => {
-    if (!confirm("确认删除此会话？")) return;
-    const ok = await deleteSession(id);
-    if (ok) setSessions((prev) => prev.filter((s) => s.id !== id));
+    // 弹出应用内确认层（替代 window.confirm）
+    const target = sessions.find((s) => s.id === id);
+    if (target) setPendingDelete(target);
+  };
+
+  // 确认删除：调后端 DELETE，成功后从列表移除
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const ok = await deleteSession(pendingDelete.id);
+      if (ok) {
+        setSessions((prev) => prev.filter((s) => s.id !== pendingDelete.id));
+        setPendingDelete(null);
+      } else {
+        setDeleteError("删除失败，会话可能已被移除或文件被占用");
+      }
+    } catch (e) {
+      console.error("delete session failed", e);
+      setDeleteError("删除失败，请重试");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const grouped = groupSessionsByDate(sessions);
@@ -153,8 +181,11 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
                       {s.summary && (
                         <div className="text-[10px] text-text-tertiary truncate">{s.summary}</div>
                       )}
-                      <div className="text-[10px] text-text-tertiary mt-0.5">
-                        {s.message_count} 条 · {s.total_tokens.toLocaleString()} tok
+                      <div className="text-[10px] text-text-tertiary mt-0.5 flex items-center gap-1 min-w-0">
+                        <span className="flex-shrink-0">{s.message_count} 条 ·</span>
+                        <span className="truncate">
+                          {s.total_tokens.toLocaleString()} tokens
+                        </span>
                       </div>
                     </div>
                     <button
@@ -252,6 +283,59 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
           设置
         </button>
       </div>
+
+      {/* 删除会话确认弹层（应用内 HTML 实现，替代原生 confirm） */}
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
+          onClick={() => {
+            if (!deleting) setPendingDelete(null);
+          }}
+        >
+          <div
+            className="w-full max-w-xs rounded-xl border border-border bg-bg-secondary shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4">
+              <div className="text-sm font-medium text-text-primary mb-1">删除会话</div>
+              <div className="text-xs text-text-secondary break-all">
+                确定删除「{pendingDelete.title || "无标题会话"}」？
+                <br />
+                <span className="text-text-tertiary">此操作不可恢复。</span>
+              </div>
+              {deleteError && (
+                <div className="mt-2 flex items-start gap-1.5 text-[11px] text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg p-2">
+                  <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+                  <span>{deleteError}</span>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+              <button
+                onClick={() => setPendingDelete(null)}
+                disabled={deleting}
+                className="px-3 py-1.5 rounded-lg text-xs text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors disabled:opacity-30"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/90 text-white text-xs hover:bg-red-500 transition-colors disabled:opacity-40"
+              >
+                {deleting ? (
+                  <>
+                    <RefreshCw size={12} className="animate-spin" />
+                    删除中...
+                  </>
+                ) : (
+                  "删除"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 });

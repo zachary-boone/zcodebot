@@ -559,9 +559,11 @@ class Agent:
 
             self.total_input_tokens += response.input_tokens
             self.total_output_tokens += response.output_tokens
+            # 发本次 turn 的增量 token；前端（桌面版）自行累加到全局统计。
+            # 此前直接发 total_* 累积值，前端若再按消息累加会重复计数。
             yield UsageEvent(
-                input_tokens=self.total_input_tokens,
-                output_tokens=self.total_output_tokens,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
             )
 
             conv_thinking = [

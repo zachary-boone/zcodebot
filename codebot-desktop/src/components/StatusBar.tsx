@@ -29,9 +29,9 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
   const engineInfo = useChatStore((s) => s.engineInfo);
   const errorMessage = useChatStore((s) => s.errorMessage);
   const workDir = useChatStore((s) => s.workDir);
-  const totalTokens = useChatStore((s) =>
-    s.messages.reduce((sum, m) => sum + (m.usage ? m.usage.input_tokens + m.usage.output_tokens : 0), 0)
-  );
+  // 本会话累计 token（后端 UsageEvent 增量在前端 sessionUsage 中累加）
+  const sessionUsage = useChatStore((s) => s.sessionUsage);
+  const totalTokens = sessionUsage.input_tokens + sessionUsage.output_tokens;
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
 

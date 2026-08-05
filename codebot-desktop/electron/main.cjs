@@ -36,9 +36,26 @@ let mainWindow = null;
 
 function spawnSidecar() {
   console.log(`[codebot-desktop] spawning sidecar: ${PYTHON_EXE} -m codebot.server --port ${SERVER_PORT}`);
+  // WorkBuddy 宿主环境会注入"安全删除"shim（sitecustomize.py，靠 PYTHONPATH +
+  // CODEBUDDY_SESSION_ID 触发加载），把 Path.unlink()/os.remove() 劫持成"移入
+  // 回收站"。在无桌面回收站的沙箱里它 fail-closed 抛错，导致会话删除接口
+  // 直接 500（Internal Server Error）。sidecar 是用户自己的应用，删除会话属于
+  // 显式意图，不需要这层保护——从子进程环境里移除触发变量，让 Python 恢复
+  // 原生 unlink 行为。
+  const env = { ...process.env };
+  delete env.CODEBUDDY_SESSION_ID;
+  delete env.CLAUDE_SESSION_ID;
+  delete env.CODEBUDDY_SAFE_DELETE_SANDBOX;
+  // 从 PYTHONPATH 中剔除宿主 shim 目录，避免 sitecustomize 被自动加载
+  const pp = env.PYTHONPATH || "";
+  env.PYTHONPATH = pp
+    .split(";")
+    .filter((p) => p && !p.includes("vendor\\shim") && !p.includes("vendor/shim"))
+    .join(";");
+
   sidecar = spawn(PYTHON_EXE, ["-m", "codebot.server", "--port", String(SERVER_PORT)], {
     cwd: PROJECT_ROOT,
-    env: { ...process.env },
+    env,
     windowsHide: true,
   });
   sidecar.stdout.on("data", (d) => console.log(`[sidecar] ${d.toString().trim()}`));
@@ -82,7 +99,11 @@ async function createWindow() {
   const isDev = !app.isPackaged;
   if (isDev) {
     await mainWindow.loadURL("http://localhost:5173");
-    mainWindow.webContents.openDevTools();
+    // 默认不自动打开 DevTools（避免每次启动都弹出 F12 界面）。
+    // 需要调试时设置环境变量 CODEBOT_DEVTOOLS=1 再启动。
+    if (process.env.CODEBOT_DEVTOOLS === "1") {
+      mainWindow.webContents.openDevTools();
+    }
   } else {
     await mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }

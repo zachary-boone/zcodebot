@@ -75,6 +75,15 @@ body {
   color: var(--accent);
   animation: blink 1s infinite;
 }
+/* 思考区的流式光标：更淡，不抢正文焦点 */
+.thinking-cursor::after {
+  content: "▊";
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+  animation: blink 1.2s infinite;
+}
 
 /* markdown 内部样式 */
 .markdown-body {
