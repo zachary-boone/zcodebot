@@ -12,6 +12,12 @@ const MODES = [
   { value: "bypass", label: "跳过所有检查" },
 ];
 
+const PROTOCOL_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  "openai-compat": "OpenAI 兼容",
+};
+
 interface Props {
   onClose: () => void;
   onSwitchMode: (mode: string) => void;
@@ -64,7 +70,7 @@ export function SettingsPanel({ onClose, onSwitchMode }: Props) {
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-text-primary">{p.name}</span>
                       <span className="text-[10px] px-2 py-0.5 rounded bg-bg-primary text-text-tertiary font-mono">
-                        {p.protocol}
+                        {PROTOCOL_LABELS[p.protocol] || p.protocol}
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs">
@@ -78,11 +84,11 @@ export function SettingsPanel({ onClose, onSwitchMode }: Props) {
                       </div>
                     </div>
                     <div className="text-xs">
-                      <div className="text-text-tertiary">API URL</div>
+                      <div className="text-text-tertiary">接口地址</div>
                       <div className="text-text-secondary font-mono truncate">{p.base_url}</div>
                     </div>
                     <div className="text-xs">
-                      <div className="text-text-tertiary">API Key</div>
+                      <div className="text-text-tertiary">接口密钥</div>
                       <div className="flex items-center gap-2">
                         <code className="flex-1 font-mono text-text-secondary truncate bg-bg-primary px-2 py-1 rounded">
                           {showKey ? p.api_key : "•".repeat(Math.min(20, p.api_key.length || 8))}
@@ -121,8 +127,7 @@ export function SettingsPanel({ onClose, onSwitchMode }: Props) {
                         }`}
                       />
                       <div>
-                        <div className="text-sm text-text-primary font-mono">{m.value}</div>
-                        <div className="text-[11px] text-text-tertiary">{m.label}</div>
+                        <div className="text-sm text-text-primary">{m.label}</div>
                       </div>
                     </button>
                   ))}
@@ -131,7 +136,7 @@ export function SettingsPanel({ onClose, onSwitchMode }: Props) {
 
               {/* 提示 */}
               <div className="text-[11px] text-text-tertiary bg-bg-tertiary rounded-lg p-3">
-                提示：修改 API Key 和模型请编辑 <code className="font-mono text-text-secondary">.codebot/config.yaml</code> 后重启。
+                提示：修改接口密钥和模型请编辑 <code className="font-mono text-text-secondary">.codebot/config.yaml</code> 后重启。
                 权限模式可即时切换。
               </div>
             </>

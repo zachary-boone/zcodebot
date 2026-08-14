@@ -11,6 +11,10 @@ const MODES = [
   { value: "bypass", label: "跳过所有检查" },
 ];
 
+function getModeLabel(value: string): string {
+  return MODES.find((m) => m.value === value)?.label || value;
+}
+
 interface Props {
   onSwitchMode: (mode: string) => void;
   onSwitchWorkDir: () => void;
@@ -76,7 +80,7 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
       <div className="flex items-center gap-3 sm:gap-4">
         {/* token 累计 */}
         {totalTokens > 0 && (
-          <span className="text-text-tertiary hidden sm:inline">{totalTokens.toLocaleString()} tok</span>
+          <span className="text-text-tertiary hidden sm:inline">{totalTokens.toLocaleString()} Token</span>
         )}
 
         {/* 权限模式切换 */}
@@ -87,7 +91,7 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
               className="flex items-center gap-1 text-text-tertiary hover:text-text-secondary transition-colors"
             >
               <Shield size={12} />
-              <span>{engineInfo.permission_mode}</span>
+              <span>{getModeLabel(engineInfo.permission_mode)}</span>
               <ChevronDown size={11} />
             </button>
             {modeOpen && (
@@ -103,8 +107,7 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
                       engineInfo.permission_mode === m.value ? "text-accent" : "text-text-secondary"
                     }`}
                   >
-                    <div className="font-mono text-xs">{m.value}</div>
-                    <div className="text-[10px] text-text-tertiary">{m.label}</div>
+                    <div className="text-xs">{m.label}</div>
                   </button>
                 ))}
               </div>

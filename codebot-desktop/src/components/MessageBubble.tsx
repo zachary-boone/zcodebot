@@ -97,7 +97,7 @@ function MessageBubbleBase({ message }: Props) {
         <div className="mt-2 flex items-center gap-3">
           {message.usage && (
             <span className="text-xs text-text-tertiary">
-              {message.usage.input_tokens + message.usage.output_tokens} tokens
+              {message.usage.input_tokens + message.usage.output_tokens} Token
             </span>
           )}
           <CopyButton text={message.content} />

@@ -1,7 +1,7 @@
 // Electron 主进程入口
 // 职责：1) spawn Python FastAPI sidecar  2) 创建窗口  3) 退出时清理 sidecar
 //       4) 提供 IPC：原生目录选择器（供前端"切换工作目录"使用）
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
@@ -109,7 +109,69 @@ async function createWindow() {
   }
 }
 
+function installApplicationMenu() {
+  const template = [
+    {
+      label: "文件",
+      submenu: [
+        { role: "quit", label: "退出" },
+      ],
+    },
+    {
+      label: "编辑",
+      submenu: [
+        { role: "undo", label: "撤销" },
+        { role: "redo", label: "重做" },
+        { type: "separator" },
+        { role: "cut", label: "剪切" },
+        { role: "copy", label: "复制" },
+        { role: "paste", label: "粘贴" },
+        { role: "selectAll", label: "全选" },
+      ],
+    },
+    {
+      label: "视图",
+      submenu: [
+        { role: "reload", label: "重新加载" },
+        { role: "forceReload", label: "强制重新加载" },
+        { role: "toggleDevTools", label: "开发者工具" },
+        { type: "separator" },
+        { role: "resetZoom", label: "实际大小" },
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "缩小" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "全屏" },
+      ],
+    },
+    {
+      label: "窗口",
+      submenu: [
+        { role: "minimize", label: "最小化" },
+        { role: "close", label: "关闭" },
+      ],
+    },
+    {
+      label: "帮助",
+      submenu: [
+        {
+          label: "关于 CodeBot",
+          click: () => {
+            dialog.showMessageBox(mainWindow, {
+              type: "info",
+              title: "关于 CodeBot",
+              message: "CodeBot 桌面版",
+              detail: `版本：${app.getVersion()}\nElectron：${process.versions.electron}\nChromium：${process.versions.chrome}\nNode.js：${process.versions.node}`,
+            });
+          },
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 app.whenReady().then(async () => {
+  installApplicationMenu();
   // 原生目录选择器：渲染进程通过 ipcRenderer.invoke('dialog:openDirectory') 调用
   // 返回选中目录的绝对路径字符串；用户取消返回空串。切工作目录时复用此能力。
   ipcMain.handle("dialog:openDirectory", async (_event, opts) => {

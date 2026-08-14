@@ -184,7 +184,7 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
                       <div className="text-[10px] text-text-tertiary mt-0.5 flex items-center gap-1 min-w-0">
                         <span className="flex-shrink-0">{s.message_count} 条 ·</span>
                         <span className="truncate">
-                          {s.total_tokens.toLocaleString()} tokens
+                          {s.total_tokens.toLocaleString()} Token
                         </span>
                       </div>
                     </div>

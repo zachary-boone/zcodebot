@@ -19,6 +19,7 @@ codebot-desktop/.vite/
 codebot-desktop/release/
 codebot-desktop/tsconfig.tsbuildinfo
 codebot-desktop/*.timestamp-*.mjs
+codebot-desktop/codebot.log
 
 # 临时文件
 commit_msg.txt
