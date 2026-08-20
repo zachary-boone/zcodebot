@@ -62,7 +62,7 @@ CodeBot 是一个协议中立、可扩展的 AI Coding Agent。它以**桌面版
 ### 安装
 
 ```bash
-git clone https://github.com/1144zhang/terminal-codebot.git && cd terminal-codebot
+git clone https://github.com/zachary-boone/zcodebot.git && cd zcodebot
 
 # 创建虚拟环境并安装（TUI 基础版）
 uv venv
@@ -302,7 +302,7 @@ hooks:
 ## 项目结构
 
 ```text
-terminal-codebot/
+zcodebot/
 ├── codebot/                  # Python 引擎
 │   ├── agent.py              # Agent 主循环（ReAct / Plan，async generator 事件流）
 │   ├── app.py                # Textual TUI 应用
