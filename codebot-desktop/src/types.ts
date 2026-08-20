@@ -8,6 +8,7 @@ export type ServerMessage =
       provider: string;
       model: string;
       permission_mode: string;
+      work_dir?: string;
     }
   | { type: "stream_text"; text: string }
   | { type: "thinking"; text: string }
@@ -41,6 +42,9 @@ export type ServerMessage =
   | { type: "done" }
   | { type: "cancelled" }
   | { type: "mode_changed"; mode: string }
+  | { type: "session_switched"; session_id: string }
+  | { type: "new_session_ready" }
+  | { type: "workdir_changed"; work_dir: string }
   | {
       type: "hook";
       hook_id: string;
@@ -54,7 +58,10 @@ export type ClientMessage =
   | { type: "send_message"; text: string }
   | { type: "permission_response"; request_id: string; decision: "allow" | "deny" | "allow_always" }
   | { type: "cancel" }
-  | { type: "switch_mode"; mode: string };
+  | { type: "switch_mode"; mode: string }
+  | { type: "switch_session"; session_id: string }
+  | { type: "new_session" }
+  | { type: "set_workdir"; path: string };
 
 // 前端 store 里一条消息（由多个事件聚合而成）
 export interface ChatMessage {
@@ -87,4 +94,22 @@ export interface PermissionRequest {
   request_id: string;
   tool_name: string;
   description: string;
+}
+
+// Electron preload 注入到 window.codebot 的原生能力。
+// 仅在 Electron 运行时存在；纯浏览器（如 vite dev 无 electron）下 codebot 为 undefined。
+// 前端调用 selectDirectory 前需判空，降级为手动输入路径。
+export interface CodebotBridge {
+  platform: string;
+  versions: { electron: string; chrome: string; node: string };
+  hasNativeDialog?: boolean;
+  selectDirectory?: (opts?: { title?: string; message?: string }) => Promise<string>;
+}
+
+// 模块内用 declare global 才能把 Window 接口合并到全局类型上，
+// 否则 App.tsx 里访问 window.codebot 会报 TS2339。
+declare global {
+  interface Window {
+    codebot?: CodebotBridge;
+  }
 }

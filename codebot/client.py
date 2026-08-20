@@ -471,43 +471,76 @@ class OpenAICompatClient(LLMClient):
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
 
-        # 用于累积 streaming tool call 的状态。Chat Completions 流按
-        # tool_calls 列表中的位置索引下发 delta，我们按索引跟踪每个进行中的调用。
-        active_calls: dict[int, dict[str, str]] = {}  # 索引 -> {id, name, args}
+        # 累积推理模型的思考内容（DeepSeek 等通过 delta.reasoning_content 下发，
+        # 标准 OpenAI 协议没有此字段）。思考结束（出现首个 content/tool_call 增量
+        # 或流结束）时 flush 成 ThinkingComplete，供历史消息保存思考过程。
+        reasoning_accum = ""
+
+        def flush_reasoning() -> None:
+            """把累积的思考内容作为 ThinkingComplete 发出（只发一次）。"""
+            nonlocal reasoning_accum
+            if reasoning_accum:
+                yield ThinkingComplete(thinking=reasoning_accum, signature="")
+                reasoning_accum = ""
+
+        def parse_usage(usage: Any) -> dict[str, int] | None:
+            """从 chunk.usage 解析 token 统计，没有则返回 None。
+
+            兼容 provider 行为差异：usage 可能嵌在带 finish_reason 的最后一个正常
+            chunk（DeepSeek），也可能在 choices 为空的独立 usage chunk（标准 OpenAI）。
+            """
+            if usage is None:
+                return None
+            # 部分兼容 provider 通过 prompt_tokens_details.cached_tokens 上报
+            # cache 命中数；prompt_tokens 含缓存 token，减去以保持可加性。
+            details = getattr(usage, "prompt_tokens_details", None)
+            cache_read = getattr(details, "cached_tokens", 0) or 0
+            prompt_tokens = usage.prompt_tokens or 0
+            return {
+                "input_tokens": max(prompt_tokens - cache_read, 0),
+                "output_tokens": usage.completion_tokens or 0,
+                "cache_read": cache_read,
+                "cache_creation": 0,
+            }
+
+        # 流式过程中只收集状态，StreamEnd 在循环结束后统一发一次（避免
+        # 标准 OpenAI 独立 usage chunk 与 DeepSeek 内嵌 usage 两种形态
+        # 产生重复/遗漏）。stop_reason 取最后出现的 finish_reason。
+        last_finish_reason = ""
+        final_usage: dict[str, int] | None = None
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
             async for chunk in response:
                 if not chunk.choices:
-                    # 最后一个 chunk，只包含 usage 数据。
-                    if chunk.usage:
-                        # 部分兼容 provider 通过 prompt_tokens_details.cached_tokens
-                        # 上报 cache 命中数，大多数不上报（cache_read 保持 0）。
-                        # prompt_tokens 包含了缓存 token，需要减去以保持
-                        # input + cache_read 可加性。没有 provider 上报 creation 计数。
-                        details = getattr(
-                            chunk.usage, "prompt_tokens_details", None
-                        )
-                        cache_read = getattr(details, "cached_tokens", 0) or 0
-                        prompt_tokens = chunk.usage.prompt_tokens or 0
-                        yield StreamEnd(
-                            stop_reason="end_turn",
-                            input_tokens=max(prompt_tokens - cache_read, 0),
-                            output_tokens=chunk.usage.completion_tokens or 0,
-                            cache_read=cache_read,
-                            cache_creation=0,
-                        )
+                    # choices 为空的 chunk：独立 usage chunk（标准 OpenAI 行为）
+                    if chunk.usage and final_usage is None:
+                        final_usage = parse_usage(chunk.usage)
                     continue
 
                 choice = chunk.choices[0]
                 delta = choice.delta
 
+                # --- 思考过程（推理模型的 reasoning_content 增量）---
+                # 注意：标准 OpenAI SDK 的 delta 没有 reasoning_content 属性，
+                # 用 getattr 安全探测；DeepSeek 等推理模型会实时下发这段内容。
+                reasoning = getattr(delta, "reasoning_content", None) if delta else None
+                if reasoning:
+                    reasoning_accum += reasoning
+                    yield ThinkingDelta(text=reasoning)
+
                 # --- 文本内容 ---
                 if delta and delta.content:
+                    # 思考结束（第一个文本增量）：把累积的推理内容落库
+                    for ev in flush_reasoning():
+                        yield ev
                     yield TextDelta(text=delta.content)
 
                 # --- tool call 增量 ---
                 if delta and delta.tool_calls:
+                    # 思考结束后直接进入 tool call：同样先落库思考内容
+                    for ev in flush_reasoning():
+                        yield ev
                     for tc in delta.tool_calls:
                         idx = tc.index
                         if idx not in active_calls:
@@ -527,7 +560,15 @@ class OpenAICompatClient(LLMClient):
                             yield ToolCallDelta(text=tc.function.arguments)
 
                 # --- 结束原因 ---
-                if choice.finish_reason in ("tool_calls", "stop"):
+                if choice.finish_reason in ("tool_calls", "stop", "max_tokens"):
+                    # 记录结束原因 + 内嵌 usage（DeepSeek 等）
+                    if not last_finish_reason:
+                        last_finish_reason = choice.finish_reason
+                    if chunk.usage and final_usage is None:
+                        final_usage = parse_usage(chunk.usage)
+                    # 流结束前仍有未落库的思考（例如思考完直接 stop）
+                    for ev in flush_reasoning():
+                        yield ev
                     if choice.finish_reason == "tool_calls":
                         for _idx, call in sorted(active_calls.items()):
                             try:
@@ -540,6 +581,18 @@ class OpenAICompatClient(LLMClient):
                                 arguments=args,
                             )
                         active_calls.clear()
+
+            # 循环正常结束：统一发一次 StreamEnd。
+            # stop_reason 取流中最后出现的 finish_reason（标准 OpenAI 的独立
+            # usage chunk 不携带 finish_reason，此处保留前面记录的结束原因）；
+            # usage 无论来自独立 chunk 还是内嵌 chunk 都已收集到 final_usage。
+            stop_reason = last_finish_reason or "end_turn"
+            if final_usage:
+                yield StreamEnd(stop_reason=stop_reason, **final_usage)
+            else:
+                # provider 未上报 usage：仍要发 StreamEnd 标记结束，
+                # 否则 agent 拿不到 stop_reason 会当作空响应处理。
+                yield StreamEnd(stop_reason=stop_reason)
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e

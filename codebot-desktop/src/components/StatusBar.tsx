@@ -1,5 +1,5 @@
-// 顶部状态栏：模型信息、权限模式切换、主题切换
-import { Cpu, Shield, Sun, Moon, ChevronDown } from "lucide-react";
+// 顶部状态栏：模型信息、工作目录切换、权限模式切换、主题切换
+import { Shield, Sun, Moon, ChevronDown, Folder, FolderOpen } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../store/chatStore";
 import { useThemeStore } from "../store/themeStore";
@@ -11,17 +11,31 @@ const MODES = [
   { value: "bypass", label: "跳过所有检查" },
 ];
 
-interface Props {
-  onSwitchMode: (mode: string) => void;
+function getModeLabel(value: string): string {
+  return MODES.find((m) => m.value === value)?.label || value;
 }
 
-export function StatusBar({ onSwitchMode }: Props) {
+interface Props {
+  onSwitchMode: (mode: string) => void;
+  onSwitchWorkDir: () => void;
+}
+
+// 把绝对路径截断成 ".../last_two_segments" 形式，避免状态栏被超长路径撑爆。
+function shortenPath(p: string): string {
+  if (!p) return "";
+  const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
+  if (parts.length <= 2) return p;
+  return ".../" + parts.slice(-2).join("/");
+}
+
+export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
   const engineStatus = useChatStore((s) => s.engineStatus);
   const engineInfo = useChatStore((s) => s.engineInfo);
   const errorMessage = useChatStore((s) => s.errorMessage);
-  const totalTokens = useChatStore((s) =>
-    s.messages.reduce((sum, m) => sum + (m.usage ? m.usage.input_tokens + m.usage.output_tokens : 0), 0)
-  );
+  const workDir = useChatStore((s) => s.workDir);
+  // 本会话累计 token（后端 UsageEvent 增量在前端 sessionUsage 中累加）
+  const sessionUsage = useChatStore((s) => s.sessionUsage);
+  const totalTokens = sessionUsage.input_tokens + sessionUsage.output_tokens;
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggle);
 
@@ -44,18 +58,29 @@ export function StatusBar({ onSwitchMode }: Props) {
 
   return (
     <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-bg-secondary text-xs">
-      <div className="flex items-center gap-3">
-        <span className="font-medium text-text-primary">CodeBot</span>
+      <div className="flex items-center gap-3 min-w-0">
+        <span className="font-medium text-text-primary flex-shrink-0">CodeBot</span>
         {engineInfo && (
-          <span className="text-text-tertiary hidden sm:inline">
+          <span className="text-text-tertiary hidden sm:inline flex-shrink-0">
             · {engineInfo.provider} / {engineInfo.model}
           </span>
         )}
+        {/* 工作目录：点击切换。鼠标悬停时显示完整路径（title）。 */}
+        <button
+          onClick={onSwitchWorkDir}
+          className="flex items-center gap-1 text-text-tertiary hover:text-text-secondary transition-colors min-w-0 group"
+          title={workDir ? `点击切换工作目录\n当前: ${workDir}` : "点击设置工作目录"}
+        >
+          {workDir ? <Folder size={12} className="flex-shrink-0" /> : <FolderOpen size={12} className="flex-shrink-0" />}
+          <span className="font-mono truncate max-w-[200px] sm:max-w-[280px]">
+            {workDir ? shortenPath(workDir) : "未设置工作目录"}
+          </span>
+        </button>
       </div>
       <div className="flex items-center gap-3 sm:gap-4">
         {/* token 累计 */}
         {totalTokens > 0 && (
-          <span className="text-text-tertiary hidden sm:inline">{totalTokens.toLocaleString()} tok</span>
+          <span className="text-text-tertiary hidden sm:inline">{totalTokens.toLocaleString()} Token</span>
         )}
 
         {/* 权限模式切换 */}
@@ -66,7 +91,7 @@ export function StatusBar({ onSwitchMode }: Props) {
               className="flex items-center gap-1 text-text-tertiary hover:text-text-secondary transition-colors"
             >
               <Shield size={12} />
-              <span>{engineInfo.permission_mode}</span>
+              <span>{getModeLabel(engineInfo.permission_mode)}</span>
               <ChevronDown size={11} />
             </button>
             {modeOpen && (
@@ -82,8 +107,7 @@ export function StatusBar({ onSwitchMode }: Props) {
                       engineInfo.permission_mode === m.value ? "text-accent" : "text-text-secondary"
                     }`}
                   >
-                    <div className="font-mono text-xs">{m.value}</div>
-                    <div className="text-[10px] text-text-tertiary">{m.label}</div>
+                    <div className="text-xs">{m.label}</div>
                   </button>
                 ))}
               </div>

@@ -1,6 +1,7 @@
 // 输入框：Enter 发送，Shift+Enter 换行，@ 文件引用补全，/ 命令补全，流式时显示停止按钮
 import { useRef, useEffect, useState, useCallback } from "react";
 import { Send, Square } from "lucide-react";
+import type { FileEntry } from "../hooks/useApi";
 
 const API_BASE = "http://127.0.0.1:7800/api";
 
@@ -14,20 +15,16 @@ const SLASH_COMMANDS = [
   { cmd: "/compact", desc: "压缩上下文" },
 ];
 
-interface FileEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-}
-
 interface Props {
   onSend: (text: string) => void;
   onCancel: () => void;
   isStreaming: boolean;
   disabled: boolean;
+  insertText?: string;
+  insertId?: number;
 }
 
-export function ChatInput({ onSend, onCancel, isStreaming, disabled }: Props) {
+export function ChatInput({ onSend, onCancel, isStreaming, disabled, insertText, insertId }: Props) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -49,6 +46,22 @@ export function ChatInput({ onSend, onCancel, isStreaming, disabled }: Props) {
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   }, [text]);
 
+  // 外部插入文本（文件树点击，用 insertId 触发避免重复）
+  useEffect(() => {
+    if (insertText && insertId !== undefined) {
+      setText((prev) => prev + insertText);
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          const pos = ta.value.length;
+          ta.setSelectionRange(pos, pos);
+        }
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertId]);
+
   // 检测 @ 或 / 触发补全
   useEffect(() => {
     const ta = textareaRef.current;
@@ -65,11 +78,13 @@ export function ChatInput({ onSend, onCancel, isStreaming, disabled }: Props) {
       fetchFiles(atMatch[1]);
       return;
     }
-    // / 命令补全：行首的 /
-    const slashMatch = before.match(/(^|\s)\/(\w*)$/);
+    // / 命令补全：行首或空格后的 /
+    const slashMatch = before.match(/(^|\s)(\/\w*)$/);
     if (slashMatch) {
+      // slashMatch[2] 是 "/help" 这样的完整串（含 /）
+      // slashPos 指向 / 本身的位置，insertCmd 时 before 切到 / 之前，替换整个 /xxx
       setSlashPos(pos - slashMatch[2].length);
-      const q = slashMatch[2].toLowerCase();
+      const q = slashMatch[2].slice(1).toLowerCase(); // 去掉 / 做过滤
       const filtered = SLASH_COMMANDS.filter((c) => c.cmd.toLowerCase().includes(q));
       setCmdList(filtered.length ? filtered : SLASH_COMMANDS);
       setShowCmdComplete(true);
