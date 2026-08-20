@@ -327,7 +327,6 @@ terminal-codebot/
 ├── codebot-desktop/          # Electron + React + TypeScript 桌面端
 │   ├── electron/             # Electron 主进程（拉起 sidecar / 原生目录选择器）
 │   └── src/                  # React 前端（聊天 / 文件树 / 设置 / 权限弹窗）
-├── docs/                     # 学习文档与设计文档
 ├── tests/                    # pytest 测试（23 个文件，587 个用例）
 ├── pyproject.toml            # 项目配置与可选依赖
 ├── uv.lock
@@ -372,10 +371,3 @@ npm run build
 npm run dist
 ```
 
-## 学习文档
-
-`docs/` 下按阶段整理了项目设计与实现说明，适合快速理解代码：
-
-- `阶段1-项目概览与快速上手.md` ~ `阶段7-RAG检索增强生成.md`
-- `RAG优化方案.md`
-- `desktop-electron-plan.md`
