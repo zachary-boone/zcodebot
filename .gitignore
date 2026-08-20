@@ -34,3 +34,6 @@ commit_msg.txt
 
 # 本机启动脚本（含硬编码路径，不提交）
 bin/codebot.cmd
+
+# 本地学习/设计文档，仅本地保留，不提交到 GitHub
+docs/
