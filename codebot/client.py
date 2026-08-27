@@ -508,6 +508,8 @@ class OpenAICompatClient(LLMClient):
         # 产生重复/遗漏）。stop_reason 取最后出现的 finish_reason。
         last_finish_reason = ""
         final_usage: dict[str, int] | None = None
+        # 按 index 累积流式下发的 tool call 增量（id/name/arguments 分片拼装）。
+        active_calls: dict[int, dict[str, str]] = {}
 
         try:
             response = await self._client.chat.completions.create(**kwargs)

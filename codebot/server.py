@@ -52,6 +52,7 @@ from codebot.config import ConfigError, load_config
 from codebot.hooks import HookConfigError, HookEngine, load_hooks
 from codebot.permissions import PermissionMode
 from codebot.runtime import Runtime, build_runtime
+from codebot.workdir_state import last_workdir, record_workdir, visited_dirs
 
 logger = logging.getLogger("codebot.server")
 
@@ -448,44 +449,68 @@ async def switch_mode(mode: str) -> dict:
 
 @app.get("/api/sessions")
 async def list_sessions() -> dict:
-    """列出所有会话（按 last_active 降序）。"""
+    """列出所有访问过的工作目录下的会话，按目录分组（每组内按 last_active 降序）。
+
+    目录来源：用户级 state.json 的 visited 列表 + 当前目录（可能尚未记录）。
+    返回 groups: [{dir, sessions: [...]}]，目录间按各自最新会话的 last_active
+    降序排列，方便前端"按目录找历史工作内容"。
+    """
     if not global_runtime:
         raise HTTPException(status_code=503, detail="引擎未就绪")
     from codebot.memory.session import SessionManager
-    sm = SessionManager(os.getcwd())
-    sessions = sm.list()
-    # 按 last_active 降序
-    sessions.sort(key=lambda s: s.last_active, reverse=True)
-    return {
-        "sessions": [
-            {
-                "id": s.id,
-                "title": s.title,
-                "summary": s.summary,
-                "message_count": s.message_count,
-                "total_tokens": s.total_tokens,
-                "created_at": s.created_at.isoformat(),
-                "last_active": s.last_active.isoformat(),
-            }
-            for s in sessions
-        ]
-    }
+    groups: list[dict[str, Any]] = []
+    seen_dirs: set[str] = set()
+    for d in visited_dirs(include=os.getcwd()):
+        path = Path(d)
+        if not path.is_dir():
+            continue
+        # Windows 盘符大小写不敏感：统一 casefold 比较避免同一目录算两个
+        key = str(path.resolve()).casefold()
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        try:
+            sessions = SessionManager(d).list()
+        except OSError:
+            continue
+        if not sessions:
+            continue
+        groups.append({
+            "dir": d,
+            "sessions": [
+                {
+                    "id": s.id,
+                    "title": s.title,
+                    "summary": s.summary,
+                    "message_count": s.message_count,
+                    "total_tokens": s.total_tokens,
+                    "created_at": s.created_at.isoformat(),
+                    "last_active": s.last_active.isoformat(),
+                }
+                for s in sessions
+            ],
+        })
+    groups.sort(key=lambda g: g["sessions"][0]["last_active"], reverse=True)
+    return {"groups": groups}
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str) -> dict:
-    """删除会话。
+async def delete_session(session_id: str, dir: str = "") -> dict:
+    """删除会话（支持跨目录：dir 指定会话所属目录，缺省为当前目录）。
 
     如果删除的是当前活动会话，先关闭它的文件句柄再删——Windows 上被
     打开的文件无法 unlink（否则 PermissionError 导致删除失败），同时让
     前端重置为干净会话。
     """
     global global_conn
-    if (
+    target_dir = dir or os.getcwd()
+    same_as_active = (
         global_conn is not None
         and global_conn.session is not None
         and global_conn.session.session_id == session_id
-    ):
+        and Path(target_dir).resolve() == Path(os.getcwd()).resolve()
+    )
+    if same_as_active:
         try:
             global_conn.session.close()
         except Exception:
@@ -502,7 +527,7 @@ async def delete_session(session_id: str) -> dict:
         await global_conn.send_json({"type": "new_session_ready"})
 
     from codebot.memory.session import SessionManager
-    sm = SessionManager(os.getcwd())
+    sm = SessionManager(target_dir)
     try:
         ok = sm.delete(session_id)
     except OSError as e:
@@ -530,7 +555,11 @@ async def get_session_messages(session_id: str) -> dict:
                 msg["thinking"] = "\n".join(tb.thinking for tb in m.thinking_blocks)
             if m.tool_uses:
                 msg["tool_uses"] = [
-                    {"tool_name": tu.tool_name, "tool_id": tu.tool_id, "arguments": tu.arguments}
+                    {
+                        "tool_name": tu.tool_name,
+                        "tool_id": tu.tool_use_id,
+                        "arguments": tu.arguments,
+                    }
                     for tu in m.tool_uses
                 ]
             messages.append(msg)
@@ -749,7 +778,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                 sm = SessionManager(os.getcwd())
                 result = sm.resume(session_id)
                 if result is None:
-                    await conn.send_json({"type": "error", "message": f"会话不存在: {session_id}"})
+                    await conn.send_json({
+                        "type": "error",
+                        "message": f"会话不存在或不在当前工作目录: {session_id}",
+                    })
                 else:
                     if conn.session:
                         conn.session.close()
@@ -797,6 +829,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                 except OSError as e:
                     await conn.send_json({"type": "error", "message": f"切换目录失败: {e}"})
                     continue
+                # 记住该目录：下次启动恢复到此处，侧栏按目录展示历史会话也依赖此记录
+                record_workdir(str(target))
                 # 4) 重建 runtime：agent / sandbox / instructions / worktree / agent_loader 都绑定 work_dir
                 #    用旧 runtime 当前的权限模式（用户可能已通过 switch_mode 切换过），避免重建后回退到配置默认值
                 current_mode = runtime.permission_checker.mode
@@ -849,7 +883,35 @@ async def ws_chat(websocket: WebSocket) -> None:
 # CLI 入口
 # ---------------------------------------------------------------------------
 
+def _restore_last_workdir() -> None:
+    """启动时恢复到上次关闭前的工作目录。
+
+    sidecar 由 Electron 以项目根为 cwd 启动；这里读取用户级状态文件
+    ~/.codebot/state.json 的 last_workdir 并 chdir。若目标目录不可用
+    （已删除）或其中没有可用的 config（~/.codebot/config.yaml 与目标目录
+    都没有时 load_config 会抛错），回退到原始 cwd 启动。
+    """
+    last = last_workdir()
+    if not last:
+        return
+    original = os.getcwd()
+    try:
+        os.chdir(last)
+        load_config()  # 探测目标目录是否有可用配置（home config 也可兜底）
+        print(f"[server] restored workdir: {last}", file=sys.stderr)
+    except ConfigError as e:
+        print(
+            f"[server] workdir {last} 无可用的 config，回退到 {original}（{e}）",
+            file=sys.stderr,
+        )
+        try:
+            os.chdir(original)
+        except OSError:
+            pass
+
+
 def main() -> None:
+    _restore_last_workdir()
     Path(".codebot").mkdir(parents=True, exist_ok=True)
     # 尝试写文件日志，失败则降级到纯 stderr（避免被 IDE 锁住 debug.log 启动失败）
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]

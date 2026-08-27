@@ -56,15 +56,22 @@ export async function browseDirectory(path: string): Promise<BrowseResult> {
   return res.json();
 }
 
-export async function fetchSessions(): Promise<SessionMeta[]> {
+// 按目录分组的会话列表（后端 /api/sessions 返回）
+export interface SessionGroup {
+  dir: string;
+  sessions: SessionMeta[];
+}
+
+export async function fetchSessionGroups(): Promise<SessionGroup[]> {
   const res = await fetch(`${API_BASE}/sessions`);
   if (!res.ok) throw new Error("加载会话失败");
   const data = await res.json();
-  return data.sessions;
+  return data.groups ?? [];
 }
 
-export async function deleteSession(id: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/sessions/${id}`, { method: "DELETE" });
+export async function deleteSession(id: string, dir?: string): Promise<boolean> {
+  const q = dir ? `?dir=${encodeURIComponent(dir)}` : "";
+  const res = await fetch(`${API_BASE}/sessions/${id}${q}`, { method: "DELETE" });
   if (!res.ok) return false;
   const data = await res.json();
   return data.deleted;

@@ -12,6 +12,11 @@ import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { WorkDirDialog } from "./components/WorkDirDialog";
 
+// Windows 路径比较：忽略大小写与 / \ 分隔符差异（os.getcwd 可能返回小写盘符）
+function sameDir(a: string, b: string): boolean {
+  return a.replace(/\//g, "\\").toLowerCase() === b.replace(/\//g, "\\").toLowerCase();
+}
+
 export default function App() {
   const { sendMessage, cancel, respondPermission, switchMode, switchSession, newSession, setWorkDir } = useWebSocket();
   const isStreaming = useChatStore((s) => s.isStreaming);
@@ -57,33 +62,66 @@ export default function App() {
 
   const disabled = engineStatus !== "ready";
 
-  // 切换会话：清空当前消息，从 REST 加载历史，发 WS 让后端也切
-  const handleSwitchSession = useCallback(async (sessionId: string) => {
-    reset();
-    try {
-      const msgs = await fetchSessionMessages(sessionId);
-      // 用历史消息填充 store
-      useChatStore.setState((state) => {
-        const chatMsgs = msgs.map((m) => ({
-          id: `hist-${m.role}-${Math.random().toString(36).slice(2, 8)}`,
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          thinking: m.thinking || "",
-          toolCalls: (m.tool_uses || []).map((tu) => ({
-            tool_id: tu.tool_id,
-            tool_name: tu.tool_name,
-            arguments: tu.arguments,
+  // 跨目录切换会话：先记录目标会话 id，等工作目录切换完成（workDir 更新）后再加载
+  const pendingSwitchRef = useRef<string | null>(null);
+
+  // 加载并切换到指定会话（必须在会话所属的工作目录下执行）
+  const loadSession = useCallback(
+    async (sessionId: string) => {
+      reset();
+      try {
+        const msgs = await fetchSessionMessages(sessionId);
+        // 用历史消息填充 store
+        useChatStore.setState((state) => {
+          const chatMsgs = msgs.map((m) => ({
+            id: `hist-${m.role}-${Math.random().toString(36).slice(2, 8)}`,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            thinking: m.thinking || "",
+            toolCalls: (m.tool_uses || []).map((tu) => ({
+              tool_id: tu.tool_id,
+              tool_name: tu.tool_name,
+              arguments: tu.arguments,
+              status: "complete" as const,
+            })),
             status: "complete" as const,
-          })),
-          status: "complete" as const,
-        }));
-        return { messages: chatMsgs };
-      });
-    } catch (e) {
-      console.error("load session messages failed", e);
+          }));
+          return { messages: chatMsgs };
+        });
+      } catch (e) {
+        console.error("load session messages failed", e);
+        // 加载失败时不要静默白屏：把错误显示在消息区，用户能明确知道是加载失败
+        useChatStore.getState().setError(
+          e instanceof Error ? `加载会话历史失败：${e.message}` : "加载会话历史失败"
+        );
+      }
+      switchSession(sessionId);
+    },
+    [reset, switchSession]
+  );
+
+  // 切换会话：会话属于其他工作目录时，先切换工作目录（后端会重建引擎），
+  // 等 workDir 更新后再加载该会话；同目录则直接加载。
+  const handleSwitchSession = useCallback(
+    (sessionId: string, dir?: string) => {
+      if (dir && !(workDir && sameDir(dir, workDir))) {
+        pendingSwitchRef.current = sessionId;
+        setWorkDir(dir);
+        return;
+      }
+      loadSession(sessionId);
+    },
+    [workDir, loadSession, setWorkDir]
+  );
+
+  // 工作目录切换完成（workdir_changed 更新 store.workDir）后，继续加载 pending 会话
+  useEffect(() => {
+    const id = pendingSwitchRef.current;
+    if (id && workDir) {
+      pendingSwitchRef.current = null;
+      loadSession(id);
     }
-    switchSession(sessionId);
-  }, [reset, switchSession]);
+  }, [workDir, loadSession]);
 
   // 文件树点击：插入 @path 到输入框（用递增 id 触发，避免 setTimeout 竞态）
   const insertIdRef = useRef(0);
