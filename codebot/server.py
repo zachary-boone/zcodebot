@@ -151,9 +151,8 @@ class SessionConnection:
     async def send_json(self, data: dict[str, Any]) -> None:
         try:
             await self.ws.send_text(json.dumps(data, ensure_ascii=False, default=str))
-        except Exception:
-            # 连接断开等，静默
-            pass
+        except Exception as e:
+            logger.debug("send_json failed (client likely disconnected): %s", e)
 
     async def run_agent(self, user_text: str) -> None:
         """启动 agent.run() 事件循环，把事件转发给前端。"""
@@ -438,7 +437,8 @@ async def switch_mode(mode: str) -> dict:
         new_mode = PermissionMode(mode)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"未知权限模式: {mode}")
-    # 全局 runtime（如果有）更新 mode
+    if global_runtime is None:
+        raise HTTPException(status_code=503, detail="服务尚未初始化，无活跃连接")
     global_runtime.permission_checker.mode = new_mode
     return {"mode": new_mode.value}
 
@@ -726,7 +726,11 @@ async def ws_chat(websocket: WebSocket) -> None:
     conn.session_manager = SessionManager(runtime.work_dir or os.getcwd())
 
     # 记录为全局活动连接，供 REST 接口（delete_session 等）操作
+    # 清理旧连接（如有），避免资源泄漏
     global global_conn
+    if global_conn is not None and global_conn.agent_task and not global_conn.agent_task.done():
+        logger.info("New WebSocket replacing active connection, cancelling old agent task")
+        global_conn.agent_task.cancel()
     global_conn = conn
 
     try:
@@ -924,8 +928,6 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=handlers,
     )
-    # 同时输出到 stderr 方便 sidecar 调试
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
 
     parser = argparse.ArgumentParser(prog="codebot.server", description="CodeBot desktop bridge")
     parser.add_argument("--host", default="127.0.0.1")

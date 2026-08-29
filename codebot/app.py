@@ -130,7 +130,8 @@ def expand_at_refs(text: str, work_dir: str) -> str:
         if not os.path.isfile(full_path):
             return m.group(0)
         try:
-            content = open(full_path, encoding="utf-8", errors="replace").read(MAX_AT_REF_BYTES)
+            with open(full_path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read(MAX_AT_REF_BYTES)
             return f"[File: {rel_path}]\n```\n{content}\n```"
         except Exception:
             return m.group(0)
@@ -427,13 +428,14 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def _to_past_tense(verb: str) -> str:
-    """把现在进行时动词转换为过去式。"""
+    """把现在进行时动词转换为过去式（简化版，覆盖 THINKING_VERBS 常见模式）。"""
     if verb.endswith("ing"):
         stem = verb[:-3]
         if stem.endswith("e"):
             return stem + "d"
-        if stem and stem[-1] in "atutitet":
-            return stem + "ed"
+        # 双辅音结尾（如 run→running, sit→sitting）：去一个辅音再加 ed
+        if len(stem) >= 2 and stem[-1] == stem[-2] and stem[-1] not in "aeiouwxy":
+            return stem[:-1] + "ed"
         return stem + "ed"
     return verb + "ed"
 
@@ -1231,8 +1233,8 @@ class CodeBotApp(App):
                 return None  # 协议不支持 / key 缺失 → 走 LLM 选择器
             self._semantic_memory_index = SemanticMemoryIndex(embedder)
             return self._semantic_memory_index
-        except Exception:
-            # 任何初始化失败都静默降级——RAG 是增强，不是依赖
+        except Exception as e:
+            log.debug("Semantic memory index init failed (degraded): %s", e)
             return None
 
     def _get_embedder(self, provider: ProviderConfig):
@@ -1246,7 +1248,8 @@ class CodeBotApp(App):
                 self._shared_embedder = create_embedding_provider(provider)
                 if not self._shared_embedder.is_available():
                     self._shared_embedder = None
-            except Exception:
+            except Exception as e:
+                log.debug("Shared embedder init failed (degraded): %s", e)
                 self._shared_embedder = None
         return self._shared_embedder
 
@@ -1296,9 +1299,8 @@ class CodeBotApp(App):
             # 用户第一次调 CodeSearch 时索引大概率已建好，消除 30-60 秒等待。
             # 失败不影响主流程——execute 里有 rebuild_if_needed 兜底。
             indexer.start_background_warmup()
-        except Exception:
-            # RAG 是增强，任何失败都不影响主流程
-            pass
+        except Exception as e:
+            log.debug("RAG code search init failed (degraded): %s", e)
 
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
         assert self.agent is not None
