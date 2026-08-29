@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -25,14 +27,72 @@ from codebot.tools.base import (
     ToolCallStart,
 )
 
+log = logging.getLogger(__name__)
 
 # 限制自动拉取模型元数据的超时时间，防止慢响应或挂起的
 # /v1/models 端点拖延启动。超时后降级为 None（即"未知"），
 # 由下一层 context window 解析逻辑接管。
 ANTHROPIC_MODEL_FETCH_TIMEOUT = 3.0
 
+# 重试默认参数
+DEFAULT_RETRY_MAX = 3
+DEFAULT_RETRY_BASE_DELAY = 1.0  # 秒
 
 _EPHEMERAL = {"type": "ephemeral"}
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """安全解析 retry-after 头。支持纯数字秒数，其他格式（HTTP 日期等）返回 None。"""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+        return seconds if seconds > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _reraise_stream_error(provider: str, exc: Exception) -> None:
+    """将 provider 特定异常转换为统一的 LLMError 子类并重新抛出。
+
+    三个 Client 类共享同一套映射逻辑，消除重复代码。
+    """
+    if provider == "anthropic":
+        import anthropic as _mod
+    else:
+        import openai as _mod  # type: ignore[assignment]
+
+    auth_err = getattr(_mod, "AuthenticationError", None)
+    rate_err = getattr(_mod, "RateLimitError", None)
+    conn_err = getattr(_mod, "APIConnectionError", None)
+    status_err = getattr(_mod, "APIStatusError", None)
+
+    if auth_err and isinstance(exc, auth_err):
+        raise AuthenticationError(f"Invalid API key: {exc}") from exc
+    if rate_err and isinstance(exc, rate_err):
+        retry = getattr(exc, "response", None)
+        retry_header = retry.headers.get("retry-after") if retry else None
+        raise RateLimitError(
+            f"Rate limited. {f'Retry after {retry_header}s.' if retry_header else 'Please wait.'}",
+            retry_after=_parse_retry_after(retry_header),
+        ) from exc
+    if conn_err and isinstance(exc, conn_err):
+        raise NetworkError(f"Network error: {exc}") from exc
+    if status_err and isinstance(exc, status_err):
+        raise LLMError(f"API error ({exc.status_code}): {exc.message}") from exc
+
+    # 无法识别的异常，原样抛出
+    raise exc
+
+
+async def _collect_stream_events(
+    stream_gen: AsyncIterator[StreamEvent],
+) -> list[StreamEvent]:
+    """收集异步生成器的所有事件到列表。用于重试前缓存已产出的事件。"""
+    events: list[StreamEvent] = []
+    async for event in stream_gen:
+        events.append(event)
+    return events
 
 
 def _mark_last_user_tail_for_cache(messages: list[dict[str, Any]]) -> None:
@@ -112,6 +172,46 @@ class LLMClient(ABC):
     def set_max_output_tokens(self, tokens: int) -> None:
         pass
 
+    async def stream_with_retry(
+        self,
+        conversation: ConversationManager,
+        system: str = "",
+        tools: list[dict[str, Any]] | None = None,
+        max_retries: int = DEFAULT_RETRY_MAX,
+        base_delay: float = DEFAULT_RETRY_BASE_DELAY,
+    ) -> AsyncIterator[StreamEvent]:
+        """带重试的 stream 包装。
+
+        对限流（RateLimitError）和网络错误（NetworkError）自动重试，
+        指数退避。其他错误直接抛出。重试耗尽后抛出最后一次异常。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                async for event in self.stream(conversation, system, tools):
+                    yield event
+                return  # 正常结束，无需重试
+            except (RateLimitError, NetworkError) as e:
+                last_exc = e
+                if attempt >= max_retries:
+                    raise
+                # 计算等待时间：优先用 retry_after，否则指数退避
+                if isinstance(e, RateLimitError) and e.retry_after:
+                    delay = e.retry_after
+                else:
+                    delay = base_delay * (2 ** attempt)
+                log.warning(
+                    "LLM 请求失败（%s），%d/%d 次重试，等待 %.1fs: %s",
+                    type(e).__name__, attempt + 1, max_retries, delay, e,
+                )
+                await asyncio.sleep(delay)
+            except (AuthenticationError, LLMError):
+                # 认证错误和一般 API 错误不重试
+                raise
+        # 理论上不会到这里，但作为兜底
+        if last_exc:
+            raise last_exc
+
 
 def _supports_adaptive_thinking(model: str) -> bool:
     for family in ("claude-opus-4-", "claude-sonnet-4-"):
@@ -164,8 +264,6 @@ class AnthropicClient(LLMClient):
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        import anthropic as _anthropic
-
         messages = build_anthropic_messages(conversation.get_messages())
 
         # 在最长稳定前缀上标记 prompt cache 断点：system、tools
@@ -268,18 +366,8 @@ class AnthropicClient(LLMClient):
                     ) or 0,
                 )
 
-        except _anthropic.AuthenticationError as e:
-            raise AuthenticationError(f"Invalid API key: {e}") from e
-        except _anthropic.RateLimitError as e:
-            retry = e.response.headers.get("retry-after") if e.response else None
-            raise RateLimitError(
-                f"Rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
-                retry_after=float(retry) if retry else None,
-            ) from e
-        except _anthropic.APIConnectionError as e:
-            raise NetworkError(f"Network error: {e}") from e
-        except _anthropic.APIStatusError as e:
-            raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+        except Exception as e:
+            _reraise_stream_error("anthropic", e)
 
 
 class OpenAIClient(LLMClient):
@@ -303,8 +391,6 @@ class OpenAIClient(LLMClient):
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        import openai as _openai
-
         input_messages = build_openai_input(conversation.get_messages())
 
         kwargs: dict[str, Any] = {
@@ -381,20 +467,8 @@ class OpenAIClient(LLMClient):
                         cache_creation=0,
                     )
 
-        except _openai.AuthenticationError as e:
-            raise AuthenticationError(f"Invalid API key: {e}") from e
-        except _openai.RateLimitError as e:
-            retry = None
-            if hasattr(e, "response") and e.response is not None:
-                retry = e.response.headers.get("retry-after")
-            raise RateLimitError(
-                f"Rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
-                retry_after=float(retry) if retry else None,
-            ) from e
-        except _openai.APIConnectionError as e:
-            raise NetworkError(f"Network error: {e}") from e
-        except _openai.APIStatusError as e:
-            raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+        except Exception as e:
+            _reraise_stream_error("openai", e)
 
 
 class OpenAICompatClient(LLMClient):
@@ -453,8 +527,6 @@ class OpenAICompatClient(LLMClient):
         system: str = "",
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        import openai as _openai
-
         messages = build_chat_completion_messages(conversation.get_messages())
 
         # 如果有 system 消息则插入到消息列表头部。
@@ -596,20 +668,8 @@ class OpenAICompatClient(LLMClient):
                 # 否则 agent 拿不到 stop_reason 会当作空响应处理。
                 yield StreamEnd(stop_reason=stop_reason)
 
-        except _openai.AuthenticationError as e:
-            raise AuthenticationError(f"Invalid API key: {e}") from e
-        except _openai.RateLimitError as e:
-            retry = None
-            if hasattr(e, "response") and e.response is not None:
-                retry = e.response.headers.get("retry-after")
-            raise RateLimitError(
-                f"Rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
-                retry_after=float(retry) if retry else None,
-            ) from e
-        except _openai.APIConnectionError as e:
-            raise NetworkError(f"Network error: {e}") from e
-        except _openai.APIStatusError as e:
-            raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+        except Exception as e:
+            _reraise_stream_error("openai-compat", e)
 
 
 def create_client(config: ProviderConfig) -> LLMClient:

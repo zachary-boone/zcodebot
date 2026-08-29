@@ -82,15 +82,12 @@ class PermissionChecker:
 
 
     def _is_plan_file(self, target_path: str) -> bool:
-        if not self.plan_file_path or not target_path:
-            return ".codebot/plans/" in target_path
-        try:
-            abs_target = os.path.abspath(target_path)
-            abs_plan = os.path.abspath(self.plan_file_path)
-            if abs_target == abs_plan:
-                return True
-        except Exception:
-            pass
-        if os.path.basename(target_path) == os.path.basename(self.plan_file_path):
+        if not target_path:
+            return False
+        if ".codebot/plans/" in target_path:
             return True
-        return ".codebot/plans/" in target_path
+        if not self.plan_file_path:
+            return False
+        abs_target = os.path.normcase(os.path.abspath(target_path))
+        abs_plan = os.path.normcase(os.path.abspath(self.plan_file_path))
+        return abs_target == abs_plan

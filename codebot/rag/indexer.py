@@ -184,7 +184,7 @@ class IncrementalIndexer:
         # 2. 删除已不存在的文件的索引
         for rel in list(self._meta.keys()):
             if rel not in current_files:
-                self._store.delete_by_file(rel)
+                await self._store.delete_by_file(rel)
                 self._meta.pop(rel, None)
                 stats["deleted"] += 1
 
@@ -204,7 +204,7 @@ class IncrementalIndexer:
 
                 # 先删旧块（文件内容变了，旧块可能过时）
                 if rel in self._meta:
-                    self._store.delete_by_file(rel)
+                    await self._store.delete_by_file(rel)
 
                 await self._store.upsert_chunks(chunks)
 

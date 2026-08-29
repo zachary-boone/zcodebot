@@ -31,7 +31,7 @@ from codebot.tools.code_search import CodeSearch, CodeSearchParams
 
 class TestChunker:
     def test_python_ast_chunking(self, tmp_path):
-        """Python 文件按函数/类切分。"""
+        """Python 文件按函数/类的方法切分（避免嵌套重复索引）。"""
         f = tmp_path / "mod.py"
         f.write_text(
             "def foo():\n"
@@ -43,16 +43,14 @@ class TestChunker:
             encoding="utf-8",
         )
         chunks = chunk_file(f, tmp_path)
-        # 应该有 foo、Bar、method 三个块
+        # 顶层函数 foo + 类方法 Bar.method，不会把整个 Bar 类体重复索引
         names = {c.name for c in chunks}
         assert "foo" in names
-        assert "Bar" in names
-        assert "method" in names
+        assert "Bar.method" in names
         # 每个块的 type 正确
         types = {c.name: c.type for c in chunks}
         assert types["foo"] == "FunctionDef"
-        assert types["Bar"] == "ClassDef"
-        assert types["method"] == "FunctionDef"
+        assert types["Bar.method"] == "FunctionDef"
 
     def test_long_function_sliding_window(self, tmp_path):
         """超长函数被滑窗二次切分。"""

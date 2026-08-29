@@ -32,7 +32,7 @@ class _MockStore:
     async def upsert_chunks(self, chunks):
         self.upsert_calls += 1
 
-    def delete_by_file(self, file_path: str) -> None:
+    async def delete_by_file(self, file_path: str) -> None:
         self.delete_calls += 1
 
     async def search(self, query_vec, top_k=20, file_filter=None):

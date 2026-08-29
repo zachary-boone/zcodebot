@@ -17,6 +17,7 @@ Qdrant 选型的三个理由（详见 docs/RAG优化方案.md §8b）：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -112,11 +113,12 @@ class QdrantCodeStore:
         except EmbeddingError as e:
             raise EmbeddingError(f"代码块 embedding 失败: {e}") from e
 
-        # 维度对齐检查
+        # 维度对齐检查：维度变了需要调用方重建 collection，
+        # 而不是在写入中途销毁已有数据。
         if vectors and len(vectors[0]) != self._dim:
-            self._dim = len(vectors[0])
-            # 维度变了需要重建 collection
-            self._recreate_collection()
+            new_dim = len(vectors[0])
+            self._recreate_collection(new_dim)
+            self._dim = new_dim
 
         points = [
             self._models.PointStruct(
@@ -138,16 +140,18 @@ class QdrantCodeStore:
         # 分批 upsert，避免单次过大
         batch_size = 64
         for i in range(0, len(points), batch_size):
-            self._client.upsert(
+            await asyncio.to_thread(
+                self._client.upsert,
                 collection_name=COLLECTION,
                 points=points[i : i + batch_size],
             )
 
-    def delete_by_file(self, file_path: str) -> None:
+    async def delete_by_file(self, file_path: str) -> None:
         """删除某文件的所有块（文件被删/大改时用）。"""
         if not self.is_available():
             return
-        self._client.delete(
+        await asyncio.to_thread(
+            self._client.delete,
             collection_name=COLLECTION,
             points_selector=self._models.FilterSelector(
                 filter=self._models.Filter(
@@ -187,7 +191,8 @@ class QdrantCodeStore:
             )
 
         try:
-            result = self._client.query_points(
+            result = await asyncio.to_thread(
+                self._client.query_points,
                 collection_name=COLLECTION,
                 query=query_vec,
                 limit=top_k,
@@ -202,10 +207,14 @@ class QdrantCodeStore:
             log.warning("Qdrant 检索失败: %s", e)
             return []
 
-    def _recreate_collection(self) -> None:
-        """维度变化时重建 collection。"""
+    def _recreate_collection(self, new_dim: int) -> None:
+        """维度变化时重建 collection。会销毁已有数据。"""
         if not self.is_available():
             return
+        log.warning(
+            "Embedding 维度变化 (%d → %d)，重建 Qdrant collection（已有向量数据将丢失）",
+            self._dim, new_dim,
+        )
         try:
             self._client.delete_collection(COLLECTION)
         except Exception:
@@ -222,7 +231,7 @@ class NullCodeStore:
     async def upsert_chunks(self, chunks: list[CodeChunk]) -> None:
         return
 
-    def delete_by_file(self, file_path: str) -> None:
+    async def delete_by_file(self, file_path: str) -> None:
         return
 
     async def search(
