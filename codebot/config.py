@@ -139,6 +139,8 @@ class AppConfig:
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
+    # 记录 YAML 中显式出现的键名，用于合并时区分"未设置"和"显式设为 false"
+    _explicit_keys: set[str] = field(default_factory=set, repr=False)
 
 
 def _load_single_file(path: Path) -> AppConfig:
@@ -182,6 +184,10 @@ def _load_single_file(path: Path) -> AppConfig:
         stale_cutoff_hours=wt["stale_cutoff_hours"],
     )
 
+    # 记录原始 YAML 中显式出现的键，用于合并时区分"未设置"和"显式 false"
+    _BOOL_KEYS = {"enable_fork", "enable_verification_agent", "enable_coordinator_mode"}
+    explicit = {k for k in _BOOL_KEYS if k in raw}
+
     return AppConfig(
         providers=providers,
         permission_mode=validated["permission_mode"],
@@ -192,7 +198,13 @@ def _load_single_file(path: Path) -> AppConfig:
         worktree=worktree_cfg,
         teammate_mode=validated["teammate_mode"],
         enable_coordinator_mode=validated["enable_coordinator_mode"],
+        _explicit_keys=explicit,
     )
+
+
+def _hook_key(hook: dict) -> tuple:
+    """提取 hook 的去重键：event + command 组合。"""
+    return (hook.get("event", ""), hook.get("command", ""))
 
 
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
@@ -210,15 +222,26 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
                 base.mcp_servers.append(s)
                 by_name[s.name] = len(base.mcp_servers) - 1
 
-    base.raw_hooks.extend(override.raw_hooks)
-    if override.enable_fork:
-        base.enable_fork = True
-    if override.enable_verification_agent:
-        base.enable_verification_agent = True
+    # Hook 去重：按 event+command 键去重，override 中的同名 hook 覆盖 base
+    if override.raw_hooks:
+        base_keys = {_hook_key(h): i for i, h in enumerate(base.raw_hooks)}
+        for h in override.raw_hooks:
+            key = _hook_key(h)
+            if key in base_keys:
+                base.raw_hooks[base_keys[key]] = h
+            else:
+                base.raw_hooks.append(h)
+                base_keys[key] = len(base.raw_hooks) - 1
+
+    # 布尔标志：只有 override 显式设置了该键时才覆盖（区分"未设置"和"显式 false"）
+    if "enable_fork" in override._explicit_keys:
+        base.enable_fork = override.enable_fork
+    if "enable_verification_agent" in override._explicit_keys:
+        base.enable_verification_agent = override.enable_verification_agent
+    if "enable_coordinator_mode" in override._explicit_keys:
+        base.enable_coordinator_mode = override.enable_coordinator_mode
     if override.teammate_mode:
         base.teammate_mode = override.teammate_mode
-    if override.enable_coordinator_mode:
-        base.enable_coordinator_mode = True
     return base
 
 

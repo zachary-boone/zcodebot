@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 from codebot.conversation import ConversationManager, Message
 
@@ -115,25 +118,31 @@ class MemoryManager:
         if not conv_lines:
             return
 
+        # 对话历史过长时截断尾部，防止 prompt 溢出 LLM 上下文窗口
+        MAX_CONV_CHARS = 80000
+        conv_text = chr(10).join(conv_lines)
+        if len(conv_text) > MAX_CONV_CHARS:
+            conv_text = conv_text[:MAX_CONV_CHARS] + "\n[对话历史过长，已截断]"
+
         prompt = (
             f"{MEMORY_EXTRACTION_PROMPT}\n\n"
             f"## 当前 memories.md\n"
             f"{current_memories if current_memories else '(空)'}\n\n"
             f"## 最近对话\n"
-            f"{chr(10).join(conv_lines)}\n\n"
+            f"{conv_text}\n\n"
             f"请输出更新后的完整 memories.md 内容。"
         )
 
         extract_conv = ConversationManager()
         extract_conv.history = [Message(role="user", content=prompt)]
 
-        collected = ""
+        parts: list[str] = []
         try:
             async for event in client.stream(
                 extract_conv, system="你是一个记忆提取助手。"
             ):
                 if isinstance(event, TextDelta):
-                    collected += event.text
+                    parts.append(event.text)
                 elif isinstance(event, StreamEnd):
                     pass
         except Exception:
@@ -141,7 +150,7 @@ class MemoryManager:
 
         self._last_extraction_msg_count = len(conversation.history)
 
-        collected = collected.strip()
+        collected = "".join(parts).strip()
         if not collected:
             return
 
@@ -210,6 +219,10 @@ class MemoryManager:
             if keyword in header:
                 project_sections.append(section_text)
                 return
+
+        # 未识别的标题兜底归入 project 分类，避免静默丢弃
+        log.debug("未识别的记忆标题 '%s'，归入 project 分类", header.strip())
+        project_sections.append(section_text)
 
 
     def clear(self) -> None:

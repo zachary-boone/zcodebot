@@ -143,16 +143,38 @@ def parse_frontmatter(content: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Scanning
+# Scanning (with mtime-based cache)
 # ---------------------------------------------------------------------------
+
+# 缓存：key=(str(memory_dir), scope), value=(dir_mtime, results, timestamp)
+_scan_cache: dict[tuple[str, str], tuple[float, list[MemoryHeader], float]] = {}
+_SCAN_CACHE_TTL = 60.0  # 秒，兜底过期时间
+
 
 def scan_memory_files(memory_dir: Path, scope: str) -> list[MemoryHeader]:
     """Walk memory_dir for .md files (excluding MEMORY.md), read frontmatter
     from each, and return a header list sorted newest-first, capped at
     MAX_MEMORY_FILES.
+
+    结果按目录 mtime 缓存：目录未变化时直接返回缓存，避免重复扫描。
     """
     if not memory_dir.is_dir():
         return []
+
+    cache_key = (str(memory_dir), scope)
+    now = time.time()
+
+    # 检查缓存：目录 mtime 未变且未过 TTL → 直接返回
+    try:
+        dir_mtime = memory_dir.stat().st_mtime
+    except OSError:
+        dir_mtime = 0.0
+
+    cached = _scan_cache.get(cache_key)
+    if cached is not None:
+        cached_mtime, cached_results, cached_time = cached
+        if cached_mtime == dir_mtime and (now - cached_time) < _SCAN_CACHE_TTL:
+            return cached_results
 
     md_files: list[Path] = []
     try:
@@ -172,6 +194,9 @@ def scan_memory_files(memory_dir: Path, scope: str) -> list[MemoryHeader]:
     results.sort(key=lambda h: h.mtime_ms, reverse=True)
     if len(results) > MAX_MEMORY_FILES:
         results = results[:MAX_MEMORY_FILES]
+
+    # 更新缓存
+    _scan_cache[cache_key] = (dir_mtime, results, now)
     return results
 
 

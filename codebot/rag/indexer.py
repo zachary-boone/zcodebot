@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -72,7 +73,7 @@ class IncrementalIndexer:
         self._bm25_dirty = True  # 是否需要重建 BM25
         # 后台预热任务引用。None 表示没有预热在跑；
         # 不为 None 时表示后台正在 rebuild，execute 应等它而非自己再调。
-        self._warm_task: Any = None
+        self._warm_task: asyncio.Task | None = None
 
     def is_available(self) -> bool:
         return self._store.is_available()
@@ -106,8 +107,7 @@ class IncrementalIndexer:
             return
         if self._warm_task is not None and not self._warm_task.done():
             return  # 已在预热
-        import asyncio
-        self._warm_task = asyncio.ensure_future(self._warmup())
+        self._warm_task = asyncio.create_task(self._warmup())
 
     def _load_meta(self) -> dict[str, FileIndexEntry]:
         if not self._meta_path.is_file():
@@ -138,9 +138,13 @@ class IncrementalIndexer:
         self._meta_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _file_hash(self, path: Path) -> str:
-        """算文件内容 hash。"""
+        """流式计算文件内容 hash，避免大文件一次性加载到内存。"""
         try:
-            return hashlib.md5(path.read_bytes()).hexdigest()
+            h = hashlib.md5()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            return h.hexdigest()
         except OSError:
             return ""
 
@@ -229,6 +233,27 @@ class IncrementalIndexer:
                 log.warning("索引 %s 失败: %s", rel, e)
 
         self._save_meta()
+
+        # BM25 重建：如果 BM25 仍为空（重启后无文件变化），从持久化的
+        # meta 元数据重建——读取已索引文件并重新分块以获取代码内容。
+        if self._bm25_dirty and self._meta and self._bm25 is not None:
+            rebuilt = 0
+            for rel, entry in self._meta.items():
+                if not entry.chunk_ids:
+                    continue
+                fpath = self._root / rel
+                if not fpath.is_file():
+                    continue
+                try:
+                    chunks = chunk_file(fpath, self._root)
+                    if chunks:
+                        self._bm25.add_docs([(c.id, c.code) for c in chunks])
+                        rebuilt += 1
+                except Exception:
+                    continue
+            if rebuilt:
+                log.debug("BM25 从持久化元数据重建了 %d 个文件", rebuilt)
+
         self._bm25_dirty = False
         return stats
 
