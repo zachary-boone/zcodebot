@@ -211,7 +211,7 @@ async def test_stop_max_iterations():
 
     c = _collect(events)
     assert len(c["error"]) == 1
-    assert "maximum iterations" in c["error"][0].message
+    assert "最大迭代次数" in c["error"][0].message
 
 @pytest.mark.asyncio
 async def test_stop_cancel():
@@ -285,7 +285,7 @@ async def test_stop_consecutive_unknown_tools():
 
     c = _collect(events)
     assert len(c["error"]) == 1
-    assert "unknown tool" in c["error"][0].message
+    assert "未知工具" in c["error"][0].message
 
 @pytest.mark.asyncio
 async def test_message_splicing():

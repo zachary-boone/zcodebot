@@ -143,6 +143,11 @@ async def build_runtime(
         instructions_content=instructions,
         hook_engine=hook_engine,
     )
+    # 从配置覆盖引擎参数
+    eng = config.engine
+    agent.max_tokens_ceiling = eng.max_tokens_ceiling
+    agent.max_output_tokens_recoveries = eng.max_output_tokens_recoveries
+    agent.memory_extraction_interval = eng.memory_extraction_interval
 
     wt_cfg = config.worktree or WorktreeConfig()
     wt_manager = WorktreeManager(

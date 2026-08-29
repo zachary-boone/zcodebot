@@ -54,9 +54,10 @@ from codebot.tools.base import (
 
 log = logging.getLogger(__name__)
 
-MEMORY_EXTRACTION_INTERVAL = 5
-MAX_TOKENS_CEILING = 64000
-MAX_OUTPUT_TOKENS_RECOVERIES = 3
+# 默认值，可通过 EngineConfig 覆盖
+_MEMORY_EXTRACTION_INTERVAL = 5
+_MAX_TOKENS_CEILING = 64000
+_MAX_OUTPUT_TOKENS_RECOVERIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -269,39 +270,6 @@ class _KnownToolSignal:
     pass
 
 
-class StreamingExecutor:
-    def __init__(self) -> None:
-        self._tasks: list[tuple[int, asyncio.Task[_ToolExecResult]]] = []
-        self._order = 0
-
-    def submit(
-        self,
-        coro: Any,
-    ) -> None:
-        task = asyncio.create_task(coro)
-        self._tasks.append((self._order, task))
-        self._order += 1
-
-    async def collect_results(self) -> list[_ToolExecResult]:
-        if not self._tasks:
-            return []
-        tasks = [t for _, t in sorted(self._tasks, key=lambda x: x[0])]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out: list[_ToolExecResult] = []
-        for r in results:
-            if isinstance(r, Exception):
-                out.append(_ToolExecResult(
-                    tool_id="",
-                    tool_name="",
-                    result=ToolResult(output=f"Tool execution error: {r}", is_error=True),
-                    elapsed=0.0,
-                    is_unknown=False,
-                ))
-            else:
-                out.append(r)
-        return out
-
-
 # ---------------------------------------------------------------------------
 # Agent 主循环
 # ---------------------------------------------------------------------------
@@ -344,6 +312,10 @@ class Agent:
         self.hook_engine = hook_engine
         self._loop_count = 0
         self._extracting = False
+        # 可通过 EngineConfig 覆盖的引擎参数
+        self.memory_extraction_interval: int = _MEMORY_EXTRACTION_INTERVAL
+        self.max_tokens_ceiling: int = _MAX_TOKENS_CEILING
+        self.max_output_tokens_recoveries: int = _MAX_OUTPUT_TOKENS_RECOVERIES
         self.session_id: str = ""
         self.active_skills: dict[str, str] = {}
         self._skill_catalog: str = ""
@@ -495,7 +467,7 @@ class Agent:
                 result, elapsed, is_unknown = item
 
         if result is None:
-            result = ToolResult(output="Error: no result from tool", is_error=True)
+            result = ToolResult(output="工具未返回结果", is_error=True)
 
         if is_unknown:
             yield _UnknownToolSignal()
@@ -550,7 +522,7 @@ class Agent:
 
             if iteration > self.max_iterations:
                 yield ErrorEvent(
-                    message=f"Agent reached maximum iterations ({self.max_iterations})"
+                    message=f"达到最大迭代次数（{self.max_iterations}）"
                 )
                 break
 
@@ -671,7 +643,7 @@ class Agent:
 
             if response.stop_reason == "max_tokens":
                 if not max_tokens_escalated:
-                    self.client.set_max_output_tokens(MAX_TOKENS_CEILING)
+                    self.client.set_max_output_tokens(self.max_tokens_ceiling)
                     max_tokens_escalated = True
                     if response.text:
                         conversation.add_assistant_message(
@@ -683,7 +655,7 @@ class Agent:
                         )
                     yield RetryEvent(reason="max_tokens escalation")
                     continue
-                elif output_recoveries < MAX_OUTPUT_TOKENS_RECOVERIES:
+                elif output_recoveries < self.max_output_tokens_recoveries:
                     output_recoveries += 1
                     conversation.add_assistant_message(
                         response.text, thinking_blocks=conv_thinking
@@ -693,7 +665,7 @@ class Agent:
                         "Break remaining work into smaller pieces."
                     )
                     yield RetryEvent(
-                        reason=f"max_tokens recovery {output_recoveries}/{MAX_OUTPUT_TOKENS_RECOVERIES}"
+                        reason=f"max_tokens recovery {output_recoveries}/{self.max_output_tokens_recoveries}"
                     )
                     continue
             else:
@@ -705,7 +677,7 @@ class Agent:
                 )
                 self._loop_count += 1
                 if (
-                    self._loop_count % MEMORY_EXTRACTION_INTERVAL == 0
+                    self._loop_count % self.memory_extraction_interval == 0
                     and self.memory_manager
                 ):
                     asyncio.ensure_future(self._extract_memories(conversation))
@@ -771,7 +743,7 @@ class Agent:
 
             if consecutive_unknown >= 3:
                 yield ErrorEvent(
-                    message="Agent terminated: too many consecutive unknown tool calls"
+                    message="终止：连续遇到过多未知工具调用"
                 )
                 break
 
@@ -829,7 +801,7 @@ class Agent:
             return _ToolExecResult(
                 tool_id=tc.tool_id,
                 tool_name=tc.tool_name,
-                result=ToolResult(output=f"Error: unknown tool '{tc.tool_name}'", is_error=True),
+                result=ToolResult(output=f"未知工具: '{tc.tool_name}'", is_error=True),
                 elapsed=time.monotonic() - start,
                 is_unknown=True,
             )
@@ -838,7 +810,7 @@ class Agent:
             return _ToolExecResult(
                 tool_id=tc.tool_id,
                 tool_name=tc.tool_name,
-                result=ToolResult(output=f"Error: tool '{tc.tool_name}' is disabled", is_error=True),
+                result=ToolResult(output=f"工具 '{tc.tool_name}' 在当前模式下已禁用", is_error=True),
                 elapsed=time.monotonic() - start,
                 is_unknown=False,
             )
@@ -847,9 +819,9 @@ class Agent:
             params = tool.params_model.model_validate(tc.arguments)
             result = await tool.execute(params)
         except ValidationError as e:
-            result = ToolResult(output=f"Parameter validation error: {e}", is_error=True)
+            result = ToolResult(output=f"参数校验错误: {e}", is_error=True)
         except Exception as e:
-            result = ToolResult(output=f"Tool execution error: {e}", is_error=True)
+            result = ToolResult(output=f"工具执行错误: {e}", is_error=True)
 
         self._snapshot_for_recovery(tc, result)
 

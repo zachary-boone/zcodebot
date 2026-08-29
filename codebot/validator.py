@@ -217,13 +217,24 @@ def validate_teammate_mode(mode: object) -> str:
     return mode
 
 
+def validate_engine(raw: object) -> dict:
+    """校验 engine 配置块。所有字段可选，缺失时使用默认值。"""
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "max_tokens_ceiling": int(raw.get("max_tokens_ceiling", 64000)),
+        "max_output_tokens_recoveries": int(raw.get("max_output_tokens_recoveries", 3)),
+        "memory_extraction_interval": int(raw.get("memory_extraction_interval", 5)),
+    }
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
     返回的字典包含以下键：
         providers、permission_mode、mcp_servers、hooks、
         enable_fork、enable_verification_agent、worktree、
-        teammate_mode、enable_coordinator_mode
+        teammate_mode、enable_coordinator_mode、engine
     """
     if not isinstance(raw, dict) or "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
@@ -242,4 +253,5 @@ def validate_config_structure(raw: object) -> dict:
         "enable_coordinator_mode": validate_bool_field(
             raw.get("enable_coordinator_mode", False), "enable_coordinator_mode"
         ),
+        "engine": validate_engine(raw.get("engine")),
     }

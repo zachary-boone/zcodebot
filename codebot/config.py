@@ -129,6 +129,14 @@ class WorktreeConfig:
 
 
 @dataclass
+class EngineConfig:
+    """引擎参数配置，覆盖 agent.py / client.py 中的硬编码常量。"""
+    max_tokens_ceiling: int = 64000
+    max_output_tokens_recoveries: int = 3
+    memory_extraction_interval: int = 5
+
+
+@dataclass
 class AppConfig:
     providers: list[ProviderConfig]
     permission_mode: str = "default"
@@ -139,6 +147,7 @@ class AppConfig:
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
+    engine: EngineConfig = field(default_factory=EngineConfig)
     # 记录 YAML 中显式出现的键名，用于合并时区分"未设置"和"显式设为 false"
     _explicit_keys: set[str] = field(default_factory=set, repr=False)
 
@@ -184,6 +193,13 @@ def _load_single_file(path: Path) -> AppConfig:
         stale_cutoff_hours=wt["stale_cutoff_hours"],
     )
 
+    eng = validated["engine"]
+    engine_cfg = EngineConfig(
+        max_tokens_ceiling=eng["max_tokens_ceiling"],
+        max_output_tokens_recoveries=eng["max_output_tokens_recoveries"],
+        memory_extraction_interval=eng["memory_extraction_interval"],
+    )
+
     # 记录原始 YAML 中显式出现的键，用于合并时区分"未设置"和"显式 false"
     _BOOL_KEYS = {"enable_fork", "enable_verification_agent", "enable_coordinator_mode"}
     explicit = {k for k in _BOOL_KEYS if k in raw}
@@ -198,6 +214,7 @@ def _load_single_file(path: Path) -> AppConfig:
         worktree=worktree_cfg,
         teammate_mode=validated["teammate_mode"],
         enable_coordinator_mode=validated["enable_coordinator_mode"],
+        engine=engine_cfg,
         _explicit_keys=explicit,
     )
 
