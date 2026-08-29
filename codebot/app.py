@@ -1,4 +1,4 @@
-# 来源：公众号@小林coding
+﻿# 来源：公众号@小林coding
 # 后端八股网站：xiaolincoding.com
 # Agent网站：xiaolinnote.com
 # 简历模版：jianli.xiaolinnote.com
@@ -1255,11 +1255,14 @@ class CodeBotApp(App):
 
         链路：EmbeddingProvider → QdrantCodeStore → IncrementalIndexer → CodeSearch
         任一环节不可用（依赖未装/key 缺失）都静默降级，CodeSearch 保留降级提示能力。
+        
+        优化：集成 QueryRewriter，支持中文查询重写，提高 BM25 命中率。
         """
         try:
             from codebot.rag import create_embedding_provider
             from codebot.rag.qdrant_store import create_code_store
             from codebot.rag.indexer import IncrementalIndexer
+            from codebot.rag.query_rewriter import QueryRewriter
             from codebot.tools.code_search import CodeSearch
 
             embedder = create_embedding_provider(provider)
@@ -1273,8 +1276,20 @@ class CodeBotApp(App):
 
             indexer = IncrementalIndexer(work_dir, store)
 
-            # 用带 indexer/embedder 的 CodeSearch 覆盖默认降级版
-            code_search = CodeSearch(indexer=indexer, embedder=embedder)
+            # 初始化查询重写器（优化中文查询匹配英文代码）
+            query_rewriter = QueryRewriter(
+                llm_client=self.agent.llm if hasattr(self, "agent") and self.agent else None,
+                cache_ttl=3600,
+                enable_local_mapping=True,
+                enable_llm_rewrite=True,
+            )
+
+            # 用带 indexer/embedder/query_rewriter 的 CodeSearch 覆盖默认降级版
+            code_search = CodeSearch(
+                indexer=indexer,
+                embedder=embedder,
+                query_rewriter=query_rewriter,
+            )
             self.registry.register(code_search)
 
             # 启动后台预热：在用户和 Agent 对话的间隙静默建索引，

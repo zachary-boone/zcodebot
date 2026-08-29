@@ -96,6 +96,43 @@ async def build_runtime(
     registry = create_default_registry()
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
+    # RAG 第二期：初始化语义代码搜索（桌面端也需要）
+    # 复用 app.py 的初始化逻辑，支持查询重写优化
+    try:
+        from codebot.rag import create_embedding_provider
+        from codebot.rag.qdrant_store import create_code_store
+        from codebot.rag.indexer import IncrementalIndexer
+        from codebot.rag.query_rewriter import QueryRewriter
+        from codebot.tools.code_search import CodeSearch
+
+        embedder = create_embedding_provider(provider)
+        if embedder.is_available():
+            store = create_code_store(embedder, project_root=work_dir)
+            if store.is_available():
+                indexer = IncrementalIndexer(work_dir, store)
+                
+                # 初始化查询重写器（优化中文查询匹配英文代码）
+                query_rewriter = QueryRewriter(
+                    llm_client=client,  # 注入LLM客户端
+                    cache_ttl=3600,
+                    enable_local_mapping=True,
+                    enable_llm_rewrite=True,
+                )
+                
+                # 用带 indexer/embedder/query_rewriter 的 CodeSearch 覆盖默认降级版
+                code_search = CodeSearch(
+                    indexer=indexer,
+                    embedder=embedder,
+                    query_rewriter=query_rewriter,
+                )
+                registry.register(code_search)
+                
+                # 启动后台预热
+                indexer.start_background_warmup()
+    except Exception:
+        # RAG 是增强，任何失败都不影响主流程
+        pass
+
     agent = Agent(
         client=client,
         registry=registry,
