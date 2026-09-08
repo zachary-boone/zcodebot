@@ -1,4 +1,4 @@
-// WebSocket 连接 + 事件分发 hook
+﻿// WebSocket 连接 + 事件分发 hook
 import { useEffect, useRef, useCallback } from "react";
 import { useChatStore } from "../store/chatStore";
 import type { ClientMessage, ServerMessage, ToolCall } from "../types";
@@ -89,7 +89,6 @@ export function useWebSocket() {
             };
             store.addToolUse(currentAssistantId.current, tool);
           }
-          break;
         }
         case "tool_result":
           if (currentAssistantId.current) {
@@ -187,6 +186,18 @@ export function useWebSocket() {
         case "hook":
           // MVP 阶段先忽略这些次要事件
           break;
+        case "subagent_status": {
+          const saMsg = msg as Extract<typeof msg, { type: "subagent_status" }>;
+          store.updateSubAgentStatus({
+            task_id: saMsg.task_id,
+            agent_name: saMsg.agent_name,
+            status: saMsg.status,
+            task_description: saMsg.task_description,
+            result: saMsg.result,
+            progress: saMsg.progress,
+          });
+          break;
+        }
       }
     },
     [store, notifySessionsChanged, flushStreamText, scheduleFlush]

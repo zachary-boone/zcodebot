@@ -1,4 +1,4 @@
-"""CodeBot 桌面版 FastAPI 桥接服务。
+﻿"""CodeBot 桌面版 FastAPI 桥接服务。
 
 启动：python -m codebot.server [--host 127.0.0.1] [--port 7800]
 
@@ -732,6 +732,28 @@ async def ws_chat(websocket: WebSocket) -> None:
         logger.info("New WebSocket replacing active connection, cancelling old agent task")
         global_conn.agent_task.cancel()
     global_conn = conn
+    # Start background task for sub-agent status updates
+    async def status_sender():
+        try:
+            while True:
+                events = await runtime.task_manager.consume_status_events()
+                for event in events:
+                    await conn.send_json({
+                        "type": "subagent_status",
+                        "task_id": event.task_id,
+                        "agent_name": event.agent_name,
+                        "status": event.status,
+                        "task_description": event.task_description,
+                        "result": event.result,
+                        "progress": event.progress,
+                    })
+                await asyncio.sleep(0.1)  # Small delay to avoid busy loop
+        except asyncio.CancelledError:
+            pass  # Task cancelled, exit gracefully
+        except Exception as e:
+            logger.error(f"status_sender error: {e}")
+            await asyncio.sleep(1)  # Back off on error
+    status_task = asyncio.create_task(status_sender())
 
     try:
         while True:
@@ -872,6 +894,8 @@ async def ws_chat(websocket: WebSocket) -> None:
     except Exception as e:
         logger.exception("ws handler error")
     finally:
+        # Cancel status sender task
+        status_task.cancel()
         # 清理全局连接引用（如果还是本连接）。
         # 注意：不要在此处重复写 `global global_conn`——CPython 编译器对
         # finally 嵌套块里的 global 声明有处理怪癖，会报 SyntaxError；
@@ -941,3 +965,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

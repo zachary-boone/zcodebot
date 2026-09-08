@@ -1,6 +1,6 @@
-// 消息状态管理（Zustand）
+﻿// 消息状态管理（Zustand）
 import { create } from "zustand";
-import type { ChatMessage, PermissionRequest, ToolCall } from "../types";
+import type { ChatMessage, PermissionRequest, ToolCall, SubAgentStatus } from "../types";
 
 interface ChatStore {
   messages: ChatMessage[];
@@ -15,6 +15,7 @@ interface ChatStore {
   // 本会话累计 token 用量（后端 UsageEvent 发的是单次增量，前端在此累加）。
   // 状态栏显示用；新会话 / 切换会话 / 切换目录时清零。
   sessionUsage: { input_tokens: number; output_tokens: number };
+  subAgentStatuses: SubAgentStatus[];
 
   // 动作
   setEngineStatus: (s: ChatStore["engineStatus"]) => void;
@@ -34,6 +35,7 @@ interface ChatStore {
   setStreaming: (s: boolean) => void;
   setPendingPermission: (p: PermissionRequest | null) => void;
   setError: (msg: string | null) => void;
+  updateSubAgentStatus: (status: SubAgentStatus) => void;
   reset: () => void;
 }
 
@@ -49,6 +51,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   errorMessage: null,
   workDir: null,
   sessionUsage: { input_tokens: 0, output_tokens: 0 },
+      subAgentStatuses: [],
 
   setEngineStatus: (s) => set({ engineStatus: s }),
   setEngineInfo: (info) => set({ engineInfo: info }),
@@ -65,6 +68,19 @@ export const useChatStore = create<ChatStore>((set) => ({
       },
     })),
   resetSessionUsage: () => set({ sessionUsage: { input_tokens: 0, output_tokens: 0 } }),
+  updateSubAgentStatus: (status: SubAgentStatus) =>
+    set((state) => {
+      const existing = state.subAgentStatuses.find((s) => s.task_id === status.task_id);
+      if (existing) {
+        return {
+          subAgentStatuses: state.subAgentStatuses.map((s) =>
+            s.task_id === status.task_id ? status : s
+          ),
+        };
+      } else {
+        return { subAgentStatuses: [...state.subAgentStatuses, status] };
+      }
+    }),
   addUserMessage: (text) =>
     set((state) => ({
       messages: [
@@ -131,5 +147,8 @@ export const useChatStore = create<ChatStore>((set) => ({
       isStreaming: false,
       errorMessage: null,
       sessionUsage: { input_tokens: 0, output_tokens: 0 },
+      subAgentStatuses: [],
     }),
 }));
+
+

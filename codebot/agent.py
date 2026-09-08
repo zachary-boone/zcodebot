@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
@@ -134,6 +134,16 @@ class HookEvent:
     success: bool
 
 
+
+@dataclass
+class SubAgentStatusEvent:
+    task_id: str
+    agent_name: str
+    status: str  # "running", "completed", "failed", "cancelled"
+    task_description: str = ""
+    result: str = ""
+    progress: dict = field(default_factory=dict)
+
 class PermissionResponse(Enum):
     ALLOW = "allow"
     DENY = "deny"
@@ -160,6 +170,7 @@ AgentEvent = (
     | PermissionRequest
     | CompactNotification
     | HookEvent
+    | SubAgentStatusEvent
 )
 
 

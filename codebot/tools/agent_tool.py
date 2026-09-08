@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
@@ -603,9 +603,11 @@ class AgentTool(Tool):
         from codebot.config import ProviderConfig
 
         model_map = {
-            "haiku": "claude-haiku-4-5-20251001",
-            "sonnet": "claude-sonnet-4-6-20250514",
-            "opus": "claude-opus-4-6-20250514",
+            "haiku": "deepseek-v4-flash",
+            "sonnet": "deepseek-v4-pro",
+            "opus": "deepseek-v4-pro",
+            "flash": "deepseek-v4-flash",
+            "pro": "deepseek-v4-pro",
         }
         model_id = model_map.get(model_alias, model_alias)
 
@@ -621,3 +623,4 @@ class AgentTool(Tool):
             return create_client(config)
         except Exception:
             return None
+

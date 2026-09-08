@@ -1,4 +1,4 @@
-// 顶部状态栏：模型信息、工作目录切换、权限模式切换、主题切换
+﻿// 顶部状态栏：模型信息、工作目录切换、权限模式切换、主题切换
 import { Shield, Sun, Moon, ChevronDown, Folder, FolderOpen } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../store/chatStore";
@@ -37,6 +37,7 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
   const sessionUsage = useChatStore((s) => s.sessionUsage);
   const totalTokens = sessionUsage.input_tokens + sessionUsage.output_tokens;
   const theme = useThemeStore((s) => s.theme);
+  const subAgentStatuses = useChatStore((s) => s.subAgentStatuses);
   const toggleTheme = useThemeStore((s) => s.toggle);
 
   const [modeOpen, setModeOpen] = useState(false);
@@ -124,6 +125,32 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
           {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
         </button>
 
+        {/* 子Agent状态 */}
+        {subAgentStatuses.length > 0 && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-text-tertiary">
+              子Agent: {subAgentStatuses.length}
+            </span>
+            {subAgentStatuses.map((status) => (
+              <span
+                key={status.task_id}
+                className={`px-1.5 py-0.5 rounded text-xs ${
+                  status.status === "running"
+                    ? "bg-blue-100 text-blue-800"
+                    : status.status === "completed"
+                    ? "bg-green-100 text-green-800"
+                    : status.status === "failed"
+                    ? "bg-red-100 text-red-800"
+                    : "bg-gray-100 text-gray-800"
+                }`}
+                title={`${status.agent_name}: ${status.task_description}\n状态: ${status.status}`}
+              >
+                {status.agent_name}
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* 连接状态 */}
         <span className={`flex items-center gap-1 ${statusColor}`}>
           <span className={`w-1.5 h-1.5 rounded-full ${
@@ -135,3 +162,6 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
     </div>
   );
 }
+
+
+

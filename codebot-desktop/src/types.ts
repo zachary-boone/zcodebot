@@ -1,6 +1,21 @@
-// 后端 WebSocket 消息类型定义（与 codebot/server.py 对应）
+﻿// 后端 WebSocket 消息类型定义（与 codebot/server.py 对应）
 
 // 后端 → 前端
+
+export interface SubAgentStatus {
+  task_id: string;
+  agent_name: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  task_description: string;
+  result: string;
+  progress: {
+    tool_call_count: number;
+    input_tokens: number;
+    output_tokens: number;
+    last_activity: string;
+  };
+}
+
 export type ServerMessage =
   | { type: "engine_initializing" }
   | {
@@ -51,6 +66,20 @@ export type ServerMessage =
       event: string;
       output: string;
       success: boolean;
+    }
+  | {
+      type: "subagent_status";
+      task_id: string;
+      agent_name: string;
+      status: "running" | "completed" | "failed" | "cancelled";
+      task_description: string;
+      result: string;
+      progress: {
+        tool_call_count: number;
+        input_tokens: number;
+        output_tokens: number;
+        last_activity: string;
+      };
     };
 
 // 前端 → 后端
@@ -113,3 +142,4 @@ declare global {
     codebot?: CodebotBridge;
   }
 }
+
