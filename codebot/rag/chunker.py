@@ -6,7 +6,9 @@
 
 策略：
   - Python：用 ast 按函数/类/方法切，保留完整语义单元
-  - 其他语言（.js/.go/.java...）：滑窗兜底，按行切 + overlap
+  - js/ts/go/java/rs/c/cpp/rb 等：用 tree-sitter 按函数/类切（见 tree_chunker.py），
+    未安装 tree-sitter 依赖时自动回退滑窗，行为零回归
+  - yaml/json/md/sh 等无语法树的语言：滑窗兜底，按行切 + overlap
   - 超长块（> MAX_CHUNK_LINES）：滑窗二次切分，带 overlap 保证边界语义连续
   - 每个块带元数据：file / type / name / start_line / end_line，存入 Qdrant payload
 
@@ -34,7 +36,7 @@ MAX_CHUNK_LINES = 50
 # 10 行能覆盖大多数函数的签名+前几行，跨块时上下文不丢。
 SLIDING_OVERLAP = 10
 
-# 支持 AST 分块的语言（按扩展名）。其他语言走滑窗兜底。
+# 用标准库 ast 分块的语言。其余代码语言的 AST 分块见 tree_chunker.py（tree-sitter）。
 AST_SUPPORTED = {".py"}
 
 # 跳过这些目录（和 tools/base.py 的 SKIP_DIRS 一致）
@@ -83,12 +85,30 @@ def chunk_file(file_path: Path, project_root: Path) -> list[CodeChunk]:
 
     rel_path = str(file_path.relative_to(project_root)).replace("\\", "/")
 
-    if file_path.suffix == ".py":
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
         chunks = _chunk_python(source, rel_path)
     else:
-        chunks = _chunk_sliding(source, rel_path)
+        chunks = _chunk_other(source, suffix, rel_path)
 
     return chunks
+
+
+def _chunk_other(source: str, suffix: str, rel_path: str) -> list[CodeChunk]:
+    """非 Python 代码文件：优先 tree-sitter 语义分块，失败/不支持则滑窗兜底。
+
+    tree-sitter 是可选依赖：未安装时 try_chunk 返回 None，这里静默回退，
+    索引流程永不中断（与 embedding 依赖缺失时的降级策略一致）。
+    """
+    try:
+        from codebot.rag import tree_chunker
+
+        chunks = tree_chunker.try_chunk(source, suffix, rel_path)
+        if chunks is not None:
+            return chunks
+    except Exception as e:  # pragma: no cover - 防御性兜底，任何异常都不阻塞索引
+        log.debug("tree-sitter 分块失败，回退滑窗（%s）: %s", rel_path, e)
+    return _chunk_sliding(source, rel_path)
 
 
 def _chunk_python(source: str, rel_path: str) -> list[CodeChunk]:
