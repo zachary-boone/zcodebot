@@ -250,6 +250,14 @@ def partition_tool_calls(
     for tc in tool_calls:
         tool = registry.get(tc.tool_name)
         safe = tool is not None and tool.is_concurrency_safe and registry.is_enabled(tc.tool_name)
+        # Agent calls are parallel only for named, isolated workers. Anonymous
+        # forks share parent context and team spawns mutate shared coordination
+        # state, so keep those sequential.
+        if tc.tool_name == "Agent":
+            agent_type = str(tc.arguments.get("subagent_type", "")).lower()
+            safe = agent_type in {"explore", "verification"} and not bool(
+                tc.arguments.get("team_name")
+            )
 
         if safe and batches and batches[-1].concurrent:
             batches[-1].calls.append(tc)
@@ -626,7 +634,11 @@ class Agent:
                 append_replacement_records(self.session_dir, _new_records)
 
             collector = StreamCollector()
-            llm_stream = self.client.stream(api_conv, system=system, tools=tools)
+            # 子 Agent 也必须使用统一的网络重试包装；并行 Explore 请求中
+            # 任一连接短暂失败时，不能直接让整个主任务报 Network error。
+            llm_stream = self.client.stream_with_retry(
+                api_conv, system=system, tools=tools
+            )
             async for event in collector.consume(llm_stream):
                 yield event
 
@@ -854,7 +866,17 @@ class Agent:
     async def _execute_batch_parallel(
         self, calls: list[ToolCallComplete]
     ) -> list[_ToolExecResult]:
-        tasks = [self._execute_single_tool_direct(tc) for tc in calls]
+        # Keep a small fan-out for Agent calls. Providers and local proxies
+        # commonly reject a burst of three or more fresh streaming connections
+        # with a generic "Connection error". Two concurrent requests preserve
+        # parallel research while keeping the connection pressure bounded.
+        semaphore = asyncio.Semaphore(2)
+
+        async def run_bounded(tc: ToolCallComplete) -> _ToolExecResult:
+            async with semaphore:
+                return await self._execute_single_tool_direct(tc)
+
+        tasks = [run_bounded(tc) for tc in calls]
         return list(await asyncio.gather(*tasks))
 
     async def _execute_tool(
@@ -1054,7 +1076,11 @@ class Agent:
                 append_replacement_records(self.session_dir, _new_records)
 
             collector = StreamCollector()
-            llm_stream = self.client.stream(api_conv, system=system, tools=tools)
+            # run_to_completion 主要服务于子 Agent，和交互式主循环一样需要
+            # 对短暂的连接失败自动重试。
+            llm_stream = self.client.stream_with_retry(
+                api_conv, system=system, tools=tools
+            )
             async for _event in collector.consume(llm_stream):
                 pass
 

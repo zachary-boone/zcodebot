@@ -114,6 +114,7 @@ USING_TOOLS_SECTION = PromptSection(
  - You can call multiple tools in a single response. If tools are independent of each other, call them all in parallel for maximum efficiency. Only call tools sequentially when one depends on the result of another.
  - When running multiple independent Bash commands, make separate parallel tool calls rather than chaining with &&.
  - Use the Agent tool to delegate complex, multi-step tasks to specialized sub-agents.
+ - For read-only research with named agents such as Explore, launch independent Agent calls in parallel when possible. Keep them in the foreground unless the user explicitly asks for background execution; wait for all inline results and synthesize the final answer in the same turn. Do not promise a later report after the turn ends.
  - When the user asks multiple agents to collaborate, form a team, or needs agents to communicate with each other, use TeamCreate to create a team, then spawn teammates with the Agent tool's team_name parameter. Teammates are long-running and communicate via SendMessage, unlike regular sub-agents which block and return inline.
  - Some specialized tools are deferred and not listed in your initial tool set. If you need a tool that isn't available, use ToolSearch to find and load it.""",
 )

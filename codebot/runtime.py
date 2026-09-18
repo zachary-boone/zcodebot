@@ -1,4 +1,4 @@
-"""CodeBot 引擎运行时 —— 把 CLI 与桌面版共用的引擎初始化逻辑抽到一处。
+﻿"""CodeBot 引擎运行时 —— 把 CLI 与桌面版共用的引擎初始化逻辑抽到一处。
 
 CLI（__main__.py）和 FastAPI 桥接服务（server.py）都调 build_runtime()，
 保证两边构造的 Agent / Registry / PermissionChecker / TeamManager 完全一致。
@@ -105,7 +105,10 @@ async def build_runtime(
         from codebot.rag.query_rewriter import QueryRewriter
         from codebot.tools.code_search import CodeSearch
 
-        embedder = create_embedding_provider(provider)
+        # Use embedding_provider if configured, otherwise fall back to main provider
+        embedding_cfg = getattr(config, 'embedding_provider', None)
+        embedding_provider = embedding_cfg if embedding_cfg else provider
+        embedder = create_embedding_provider(embedding_provider)
         if embedder.is_available():
             store = create_code_store(embedder, project_root=work_dir)
             if store.is_available():
@@ -204,3 +207,4 @@ async def build_runtime(
         config=config,
         work_dir=work_dir,
     )
+

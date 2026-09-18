@@ -89,6 +89,9 @@ body {
 .markdown-body {
   font-size: 14px;
   line-height: 1.7;
+  /* 限制正文宽度，避免短句/代码把整块对话区域撑满。 */
+  max-width: 88ch;
+  overflow-wrap: anywhere;
 }
 .markdown-body p {
   margin: 0 0 0.75em;
@@ -99,6 +102,9 @@ body {
   border-radius: 8px;
   padding: 12px 16px;
   overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
   margin: 0.75em 0;
 }
 .markdown-body code {

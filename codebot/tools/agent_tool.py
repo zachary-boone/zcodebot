@@ -67,7 +67,10 @@ class AgentTool(Tool):
     )
     params_model = AgentToolParams
     category = "command"
-    is_concurrency_safe = False
+    # Named Explore/Verification workers have isolated conversations and can be
+    # executed in parallel when the model emits several Agent calls in one turn.
+    # Fork/team paths remain internally managed by TaskManager.
+    is_concurrency_safe = True
 
 
     def __init__(
@@ -155,7 +158,11 @@ class AgentTool(Tool):
         client = self._select_llm(p, definition)
 
         is_background = p.run_in_background or definition.background
-        if self._enable_fork:
+        # ``enable_fork`` only forces anonymous conversation forks into the
+        # background. Named workers (for example three Explore agents) must
+        # return inline so the parent can receive all results and synthesize a
+        # final answer in the same turn.
+        if self._enable_fork and p.subagent_type is None:
             is_background = True
 
         _base_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
@@ -201,17 +208,51 @@ class AgentTool(Tool):
             )
 
         # 前台同步执行
+        tracking_id = self._task_manager.start_foreground(
+            agent=sub_agent,
+            task=p.prompt,
+            name=agent_name,
+        )
+
+        def on_progress(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "tool_use":
+                activity = f"正在调用 {event.get('toolName', '工具')}"
+                self._task_manager.update_progress(
+                    tracking_id, tool_call_delta=1, last_activity=activity
+                )
+            elif event_type == "usage":
+                usage = event.get("usage") or {}
+                self._task_manager.update_progress(
+                    tracking_id,
+                    input_tokens=int(usage.get("inputTokens", 0)),
+                    output_tokens=int(usage.get("outputTokens", 0)),
+                    last_activity="正在分析结果",
+                )
+            elif event_type == "stream_text":
+                self._task_manager.update_progress(
+                    tracking_id, last_activity="正在整理回答"
+                )
+
         try:
             if is_fork:
-                result_text = await sub_agent.run_to_completion("", conversation)
+                result_text = await sub_agent.run_to_completion(
+                    "", conversation, event_callback=on_progress
+                )
             else:
-                result_text = await sub_agent.run_to_completion(p.prompt)
+                result_text = await sub_agent.run_to_completion(
+                    p.prompt, event_callback=on_progress
+                )
         except Exception as e:
+            self._task_manager.fail_foreground(tracking_id, f"Error: {e}")
             self._trace_manager.complete(trace_node.agent_id, "failed")
             return ToolResult(
                 output=f"Sub-agent failed: {e}", is_error=True
             )
 
+        self._task_manager.complete_foreground(
+            tracking_id, result=result_text or "(sub-agent returned no output)"
+        )
         self._trace_manager.update(
             trace_node.agent_id,
             input_tokens=sub_agent.total_input_tokens,

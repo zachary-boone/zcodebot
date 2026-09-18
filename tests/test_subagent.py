@@ -585,6 +585,25 @@ class TestTaskManager:
         assert names == {"t1", "t2"}
         await asyncio.sleep(0.1)  # 让后台任务跑完
 
+    @pytest.mark.asyncio
+    async def test_foreground_progress_lifecycle(self, mock_agent):
+        tm = TaskManager()
+        task_id = tm.start_foreground(mock_agent, "explore code", name="Explore")
+
+        running = await tm.consume_status_events()
+        assert running[0].status == "running"
+        assert running[0].agent_name == "Explore"
+
+        tm.update_progress(task_id, tool_call_delta=2, last_activity="正在读取文件")
+        updates = await tm.consume_status_events()
+        assert updates[-1].progress["tool_call_count"] == 2
+        assert updates[-1].progress["last_activity"] == "正在读取文件"
+
+        tm.complete_foreground(task_id, "架构分析结果")
+        completed = await tm.consume_status_events()
+        assert completed[-1].status == "completed"
+        assert completed[-1].result == "架构分析结果"
+
     def test_cancel_nonexistent(self):
         tm = TaskManager()
         assert tm.cancel("nope") is False

@@ -68,7 +68,12 @@ When calling Agent:
 - Do not use one worker to check on another. Workers will notify you when they are done.
 - Do not use workers to trivially report file contents or run commands. Give them higher-level tasks.
 - Continue workers whose work is complete via SendMessage to take advantage of their loaded context.
-- After launching agents, briefly tell the user what you launched and end your response. Never fabricate or predict agent results.
+- For explicitly background agents, briefly tell the user what you launched and end that response. For foreground research agents, wait for their tool results and continue to the synthesis below; never fabricate or predict agent results.
+- Named Explore/Verification workers return their results to you after the tool
+  calls finish. If several such calls were requested in parallel, wait for all
+  returned tool results in the same turn, then synthesize them into one final
+  answer. Do not tell the user to wait, and do not end with a promise to report
+  later unless the task was explicitly launched with `run_in_background: true`.
 
 ### Agent Results
 

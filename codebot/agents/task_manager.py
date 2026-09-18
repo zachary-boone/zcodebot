@@ -76,7 +76,7 @@ class TaskManager:
             status="running",
             task_description=bg.task,
             result="",
-            progress={},
+            progress=self._progress_dict(bg),
         )
         self._status_queue.put_nowait(running_event)
 
@@ -89,6 +89,97 @@ class TaskManager:
         bg.cancel = async_task.cancel
         return task_id
 
+    def start_foreground(self, agent: Any, task: str, name: str = "") -> str:
+        """Register an inline worker so its progress is visible to the UI.
+
+        Inline workers are awaited by the parent Agent, so they must not be
+        scheduled through ``launch`` (which is intentionally fire-and-forget).
+        They still share the same status stream as background tasks.
+        """
+        task_id = uuid.uuid4().hex[:8]
+        bg = BackgroundTask(id=task_id, name=name or task_id, agent=agent, task=task)
+        self._tasks[task_id] = bg
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=task_id,
+            agent_name=bg.name,
+            status="running",
+            task_description=bg.task,
+            result="",
+            progress=self._progress_dict(bg),
+        ))
+        return task_id
+
+    @staticmethod
+    def _progress_dict(bg: BackgroundTask) -> dict[str, Any]:
+        return {
+            "tool_call_count": bg.progress.tool_call_count,
+            "input_tokens": bg.progress.input_tokens,
+            "output_tokens": bg.progress.output_tokens,
+            "last_activity": bg.progress.last_activity,
+        }
+
+    def update_progress(
+        self,
+        task_id: str,
+        *,
+        tool_call_delta: int = 0,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        last_activity: str = "",
+    ) -> None:
+        bg = self._tasks.get(task_id)
+        if bg is None or bg.status != "running":
+            return
+        bg.progress.tool_call_count += tool_call_delta
+        if input_tokens is not None:
+            bg.progress.input_tokens = input_tokens
+        if output_tokens is not None:
+            bg.progress.output_tokens = output_tokens
+        if last_activity:
+            bg.progress.last_activity = last_activity
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=bg.id,
+            agent_name=bg.name,
+            status=bg.status,
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        ))
+
+    def complete_foreground(self, task_id: str, result: str = "") -> None:
+        bg = self._tasks.get(task_id)
+        if bg is None:
+            return
+        bg.status = "completed"
+        bg.result = result
+        bg.end_time = time.monotonic()
+        bg.progress.input_tokens = bg.agent.total_input_tokens
+        bg.progress.output_tokens = bg.agent.total_output_tokens
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=bg.id,
+            agent_name=bg.name,
+            status=bg.status,
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        ))
+
+    def fail_foreground(self, task_id: str, result: str) -> None:
+        bg = self._tasks.get(task_id)
+        if bg is None:
+            return
+        bg.status = "failed"
+        bg.result = result
+        bg.end_time = time.monotonic()
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=bg.id,
+            agent_name=bg.name,
+            status=bg.status,
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        ))
+
 
     async def _run_background(
         self, task_id: str, fork_conversation: Any = None
@@ -97,11 +188,32 @@ class TaskManager:
         if bg is None:
             return
 
+        def on_progress(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "tool_use":
+                self.update_progress(
+                    task_id,
+                    tool_call_delta=1,
+                    last_activity=f"正在调用 {event.get('toolName', '工具')}",
+                )
+            elif event_type == "usage":
+                usage = event.get("usage") or {}
+                self.update_progress(
+                    task_id,
+                    input_tokens=int(usage.get("inputTokens", 0)),
+                    output_tokens=int(usage.get("outputTokens", 0)),
+                    last_activity="正在分析结果",
+                )
+
         try:
             if fork_conversation is not None:
-                result = await bg.agent.run_to_completion("", fork_conversation)
+                result = await bg.agent.run_to_completion(
+                    "", fork_conversation, event_callback=on_progress
+                )
             else:
-                result = await bg.agent.run_to_completion(bg.task)
+                result = await bg.agent.run_to_completion(
+                    bg.task, event_callback=on_progress
+                )
             bg.result = result
             bg.status = "completed"
             event = SubAgentStatusEvent(
@@ -220,7 +332,7 @@ class TaskManager:
             status="running",
             task_description=bg.task,
             result=bg.result,
-            progress={},
+            progress=self._progress_dict(bg),
         )
         self._status_queue.put_nowait(running_event)
         return task_id
@@ -231,8 +343,27 @@ class TaskManager:
         if bg is None:
             return
 
+        def on_progress(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "tool_use":
+                self.update_progress(
+                    task_id,
+                    tool_call_delta=1,
+                    last_activity=f"正在调用 {event.get('toolName', '工具')}",
+                )
+            elif event_type == "usage":
+                usage = event.get("usage") or {}
+                self.update_progress(
+                    task_id,
+                    input_tokens=int(usage.get("inputTokens", 0)),
+                    output_tokens=int(usage.get("outputTokens", 0)),
+                    last_activity="正在分析结果",
+                )
+
         try:
-            result = await bg.agent.run_to_completion(bg.task)
+            result = await bg.agent.run_to_completion(
+                bg.task, event_callback=on_progress
+            )
             bg.result = (bg.result + "\n" + result).strip() if bg.result else result
             bg.status = "completed"
             event = SubAgentStatusEvent(

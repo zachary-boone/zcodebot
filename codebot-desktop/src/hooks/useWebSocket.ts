@@ -75,9 +75,7 @@ export function useWebSocket() {
           }
           break;
         case "thinking":
-          if (currentAssistantId.current) {
-            store.appendThinking(currentAssistantId.current, msg.text);
-          }
+          // 推理内容不是最终答复，也不应占用对话区域；直接忽略。
           break;
         case "tool_use": {
           if (currentAssistantId.current) {
@@ -89,6 +87,7 @@ export function useWebSocket() {
             };
             store.addToolUse(currentAssistantId.current, tool);
           }
+          break;
         }
         case "tool_result":
           if (currentAssistantId.current) {

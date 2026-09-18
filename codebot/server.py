@@ -198,6 +198,10 @@ class SessionConnection:
                                 / f"{self.session.session_id}.meta"
                             )
                         await self.send_json(event_to_dict(event))
+                    elif isinstance(event, ThinkingText):
+                        # 模型内部推理不是最终答复，不发送到桌面端，避免泄露
+                        # 思考内容并占据大量对话空间。
+                        continue
                     else:
                         await self.send_json(event_to_dict(event))
                 self.persist_history_since_cursor()
@@ -405,7 +409,7 @@ async def browse_directory(path: str = "") -> dict:
 
 @app.get("/api/config")
 async def get_config() -> dict:
-    """读取当前 config 关键字段（脱敏 api_key）。"""
+    """读取桌面端设置页所需的当前配置。"""
     try:
         config = load_config()
     except ConfigError as e:
@@ -418,7 +422,9 @@ async def get_config() -> dict:
             "base_url": p.base_url,
             "model": p.model,
             "thinking": getattr(p, "thinking", False),
-            "api_key": "***" if getattr(p, "api_key", "") else "",
+            # 此服务只由 Electron 通过 127.0.0.1 访问。设置页的“小眼睛”
+            # 需要拿到原始值才能切换显示；脱敏值会使切换后始终显示 "***"。
+            "api_key": p.resolve_api_key(),
         })
     return {
         "providers": providers,
