@@ -171,7 +171,7 @@ class TestAgentParser:
         assert body == "body text"
 
     def test_valid_permission_modes(self, tmp_path: Path):
-        for mode in ("default", "acceptEdits", "dontAsk"):
+        for mode in ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"):
             f = tmp_path / f"{mode}.md"
             f.write_text(f"---\nname: t\ndescription: t\npermissionMode: {mode}\n---\nbody")
             agent_def = parse_agent_file(f)
@@ -207,6 +207,8 @@ class TestAgentLoader:
         loader = AgentLoader(str(tmp_path), enable_verification=True)
         agents = loader.load_all()
         assert "Verification" in agents
+        assert agents["Verification"].background is False
+        assert agents["Verification"].permission_mode == "dontAsk"
 
     def test_project_overrides_builtin(self, tmp_path: Path):
         agents_dir = tmp_path / ".codebot" / "agents"

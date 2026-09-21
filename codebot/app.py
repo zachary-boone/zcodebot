@@ -952,11 +952,9 @@ class CodeBotApp(App):
         if self.agent is None:
             return
         if enabled:
-            self._pre_plan_mode = self.agent.permission_mode
-            self.agent.set_permission_mode(PermissionMode.PLAN)
+            self.agent.enter_plan_mode()
         else:
-            restore = getattr(self, "_pre_plan_mode", PermissionMode.DEFAULT)
-            self.agent.set_permission_mode(restore)
+            self.agent.exit_plan_mode()
         self._update_mode_label()
 
     def get_token_count(self) -> tuple[int, int]:
@@ -1126,7 +1124,12 @@ class CodeBotApp(App):
         except ValueError:
             idx = 0
         next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-        self.agent.set_permission_mode(next_mode)
+        if next_mode == PermissionMode.PLAN:
+            self.agent.enter_plan_mode()
+        elif current == PermissionMode.PLAN:
+            self.agent.exit_plan_mode(next_mode)
+        else:
+            self.agent.set_permission_mode(next_mode)
         self._update_mode_label()
 
     def action_toggle_tool_blocks(self) -> None:
@@ -1630,17 +1633,20 @@ class CodeBotApp(App):
             except Exception:
                 pass
 
-        pre = getattr(self, "_pre_plan_mode", PermissionMode.DEFAULT)
         if choice == PlanChoice.YOLO:
-            self.agent.set_permission_mode(PermissionMode.BYPASS)
+            if not plan_content.strip():
+                self._show_system_message("计划文件不存在或为空，无法执行")
+                return
+            self.agent.exit_plan_mode(PermissionMode.BYPASS)
             self._update_mode_label()
-            if plan_content:
-                self.send_user_message(f"Execute this plan:\n\n{plan_content}")
+            self.send_user_message(f"Execute this plan:\n\n{plan_content}")
         elif choice == PlanChoice.MANUAL:
-            self.agent.set_permission_mode(pre)
+            if not plan_content.strip():
+                self._show_system_message("计划文件不存在或为空，无法执行")
+                return
+            self.agent.exit_plan_mode()
             self._update_mode_label()
-            if plan_content:
-                self.send_user_message(f"Execute this plan:\n\n{plan_content}")
+            self.send_user_message(f"Execute this plan:\n\n{plan_content}")
         elif choice == PlanChoice.FEEDBACK:
             if feedback:
                 self.send_user_message(feedback)

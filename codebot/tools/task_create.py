@@ -31,7 +31,8 @@ class TaskCreateTool(Tool):
     )
     params_model = TaskCreateParams
     category = "command"
-    is_concurrency_safe = True
+    # 修改共享任务表，不能进入不经过权限检查的并发批。
+    is_concurrency_safe = False
 
 
     def __init__(self, team_manager: TeamManager, team_name: str, agent_name: str = "") -> None:

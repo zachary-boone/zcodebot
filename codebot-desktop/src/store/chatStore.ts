@@ -1,10 +1,11 @@
 ﻿// 消息状态管理（Zustand）
 import { create } from "zustand";
-import type { ChatMessage, PermissionRequest, ToolCall, SubAgentStatus } from "../types";
+import type { ChatMessage, PermissionRequest, PendingPlan, ToolCall, SubAgentStatus } from "../types";
 
 interface ChatStore {
   messages: ChatMessage[];
   pendingPermission: PermissionRequest | null;
+  pendingPlan: PendingPlan | null;
   isStreaming: boolean;
   engineStatus: "disconnected" | "initializing" | "ready" | "error";
   engineInfo: { provider: string; model: string; permission_mode: string } | null;
@@ -34,6 +35,7 @@ interface ChatStore {
   completeMessage: (msgId: string, status: "complete" | "error") => void;
   setStreaming: (s: boolean) => void;
   setPendingPermission: (p: PermissionRequest | null) => void;
+  setPendingPlan: (p: PendingPlan | null) => void;
   setError: (msg: string | null) => void;
   updateSubAgentStatus: (status: SubAgentStatus) => void;
   reset: () => void;
@@ -45,6 +47,7 @@ const genId = () => `msg-${Date.now()}-${idCounter++}`;
 export const useChatStore = create<ChatStore>((set) => ({
   messages: [],
   pendingPermission: null,
+  pendingPlan: null,
   isStreaming: false,
   engineStatus: "disconnected",
   engineInfo: null,
@@ -139,11 +142,13 @@ export const useChatStore = create<ChatStore>((set) => ({
     })),
   setStreaming: (s) => set({ isStreaming: s }),
   setPendingPermission: (p) => set({ pendingPermission: p }),
+  setPendingPlan: (p) => set({ pendingPlan: p }),
   setError: (msg) => set({ errorMessage: msg }),
   reset: () =>
     set({
       messages: [],
       pendingPermission: null,
+      pendingPlan: null,
       isStreaming: false,
       errorMessage: null,
       sessionUsage: { input_tokens: 0, output_tokens: 0 },

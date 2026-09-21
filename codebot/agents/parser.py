@@ -9,7 +9,14 @@ import yaml
 log = logging.getLogger(__name__)
 
 VALID_MODELS = {"inherit", "sonnet", "opus", "haiku", "flash", "pro", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", ""}
-VALID_PERMISSION_MODES = {"default", "acceptEdits", "dontAsk", ""}
+VALID_PERMISSION_MODES = {
+    "default",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+    "dontAsk",
+    "",
+}
 
 
 class AgentParseError(Exception):

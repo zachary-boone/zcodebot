@@ -40,6 +40,8 @@ class AgentToolParams(BaseModel):
 PERMISSION_MODE_MAP = {
     "default": "DEFAULT",
     "acceptEdits": "ACCEPT_EDITS",
+    "plan": "PLAN",
+    "bypassPermissions": "BYPASS",
     "dontAsk": "DONT_ASK",
 }
 
@@ -480,11 +482,14 @@ class AgentTool(Tool):
             PermissionMode,
             RuleEngine,
         )
-        pm_enum = getattr(
-            PermissionMode,
-            PERMISSION_MODE_MAP.get(mode_str, "DEFAULT"),
-            PermissionMode.DEFAULT,
-        )
+        enum_name = PERMISSION_MODE_MAP.get(mode_str)
+        if enum_name is None:
+            log.warning(
+                "Unknown sub-agent permission mode %r; falling back to default",
+                mode_str,
+            )
+            enum_name = "DEFAULT"
+        pm_enum = getattr(PermissionMode, enum_name, PermissionMode.DEFAULT)
         return PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(work_dir),

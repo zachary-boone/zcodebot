@@ -8,10 +8,7 @@ interface Props {
 }
 
 export function PermissionDialog({ request, onRespond }: Props) {
-  const isDangerous =
-    /rm\s+-rf|del\s+\/[sq]|format\s+:|mkfs|dd\s+if=|>\s*\/dev\/sd/i.test(
-      request.description
-    );
+  const isDangerous = request.is_dangerous;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

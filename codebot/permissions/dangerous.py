@@ -11,6 +11,19 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"curl\s+.*\|\s*(ba)?sh"), "管道执行远程脚本"),
     (re.compile(r"wget\s+.*\|\s*(ba)?sh"), "管道执行远程脚本"),
     (re.compile(r">\s*/dev/sd"), "覆盖磁盘设备"),
+    (re.compile(r"\brm\s+-\w*r\w*f\w*(\s+-\w+)*\s+\S"), "递归强制删除"),
+    (re.compile(r"\brm\s+-\w*f\w*r\w*(\s+-\w+)*\s+\S"), "递归强制删除"),
+    (re.compile(r"\bgit\s+clean\s+-\w*[fdx]"), "git clean 丢弃未跟踪文件"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b"), "丢弃未提交改动"),
+    (re.compile(r"\bgit\s+push\b.*\s(--force|-f)\b"), "强制推送"),
+    (re.compile(r"\bchmod\s+-R\s+777\b"), "递归放开权限"),
+    (re.compile(r"\bdd\s+if=.*\bof="), "dd 写目标设备/文件"),
+    (re.compile(r"\b(shred|truncate)\s"), "不可逆擦除/截断"),
+    (re.compile(r">\s*/dev/[sh]d"), "覆盖磁盘设备"),
+    (re.compile(r"\bdel\s+/[sq]\b", re.IGNORECASE), "Windows 递归删除"),
+    (re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE), "格式化盘符"),
+    (re.compile(r"\bmkfs(\.\w+)?\b"), "格式化文件系统"),
+    (re.compile(r":\(\)\s*\{.*\}\s*;\s*:"), "fork bomb"),
 ]
 
 

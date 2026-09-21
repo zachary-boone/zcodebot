@@ -45,6 +45,7 @@ export type ServerMessage =
     }
   | { type: "turn_complete"; turn: number }
   | { type: "loop_complete"; total_turns: number }
+  | { type: "plan_ready"; plan_path: string; plan_content: string; has_plan: boolean }
   | { type: "usage"; input_tokens: number; output_tokens: number }
   | { type: "error"; message: string }
   | { type: "compact"; before_tokens: number; message: string }
@@ -53,6 +54,7 @@ export type ServerMessage =
       request_id: string;
       tool_name: string;
       description: string;
+      is_dangerous: boolean;
     }
   | { type: "done" }
   | { type: "cancelled" }
@@ -90,7 +92,14 @@ export type ClientMessage =
   | { type: "switch_mode"; mode: string }
   | { type: "switch_session"; session_id: string }
   | { type: "new_session" }
-  | { type: "set_workdir"; path: string };
+  | { type: "set_workdir"; path: string }
+  | { type: "plan_decision"; decision: "yolo" | "manual" | "feedback"; feedback?: string };
+
+export interface PendingPlan {
+  plan_path: string;
+  plan_content: string;
+  has_plan: boolean;
+}
 
 // 前端 store 里一条消息（由多个事件聚合而成）
 export interface ChatMessage {
@@ -123,6 +132,7 @@ export interface PermissionRequest {
   request_id: string;
   tool_name: string;
   description: string;
+  is_dangerous: boolean;
 }
 
 // Electron preload 注入到 window.codebot 的原生能力。

@@ -51,10 +51,22 @@ from codebot.agent import (
 from codebot.config import ConfigError, load_config
 from codebot.hooks import HookConfigError, HookEngine, load_hooks
 from codebot.permissions import PermissionMode
+from codebot.permissions.dangerous import DangerousCommandDetector
 from codebot.runtime import Runtime, build_runtime
 from codebot.workdir_state import last_workdir, record_workdir, visited_dirs
 
 logger = logging.getLogger("codebot.server")
+_dangerous_detector = DangerousCommandDetector()
+
+
+def _set_runtime_mode(runtime: Runtime, mode: PermissionMode) -> None:
+    """切换模式并维护规划模式的恢复栈。"""
+    if mode == PermissionMode.PLAN:
+        runtime.agent.enter_plan_mode()
+    elif runtime.agent.plan_mode:
+        runtime.agent.exit_plan_mode(mode)
+    else:
+        runtime.agent.set_permission_mode(mode)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +185,7 @@ class SessionConnection:
                             "request_id": req_id,
                             "tool_name": event.tool_name,
                             "description": event.description,
+                            "is_dangerous": _dangerous_detector.detect(event.description)[0],
                         })
                     elif isinstance(event, CompactNotification):
                         if self.session and event.boundary is not None:
@@ -198,6 +211,9 @@ class SessionConnection:
                                 / f"{self.session.session_id}.meta"
                             )
                         await self.send_json(event_to_dict(event))
+                        if self.runtime.agent.plan_mode:
+                            await self._send_plan_ready()
+                        self.drain_completed_tasks()
                     elif isinstance(event, ThinkingText):
                         # 模型内部推理不是最终答复，不发送到桌面端，避免泄露
                         # 思考内容并占据大量对话空间。
@@ -206,6 +222,9 @@ class SessionConnection:
                         await self.send_json(event_to_dict(event))
                 self.persist_history_since_cursor()
                 # run() 正常结束
+                # 在发送 done 前释放句柄，避免用户收到 plan_ready 后立即批准时
+                # 被误判为“已有任务在运行”。finally 会再次兜底清理。
+                self.agent_task = None
                 await self.send_json({"type": "done"})
             except asyncio.CancelledError:
                 await self.send_json({"type": "cancelled"})
@@ -217,6 +236,40 @@ class SessionConnection:
                 self.agent_task = None
 
         self.agent_task = asyncio.create_task(_drain())
+
+    async def _send_plan_ready(self) -> None:
+        """通知桌面端计划已经生成，等待用户决定如何继续。"""
+        plan_path = self.runtime.agent._get_plan_path()
+        plan_content = ""
+        try:
+            if plan_path.is_file():
+                plan_content = plan_path.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("读取计划文件失败: %s", e)
+        await self.send_json({
+            "type": "plan_ready",
+            "plan_path": str(plan_path),
+            "plan_content": plan_content,
+            "has_plan": bool(plan_content.strip()),
+        })
+
+    def drain_completed_tasks(self) -> None:
+        """将后台子 Agent 的完成结果注入主 Agent 对话历史。"""
+        try:
+            completed = self.runtime.task_manager.poll_completed()
+        except Exception as e:
+            logger.debug("poll_completed failed: %s", e)
+            return
+        if not completed:
+            return
+        from codebot.agents.notification import inject_task_notifications
+        inject_task_notifications(self.runtime.conversation, completed)
+        for task in completed:
+            logger.info(
+                "background task %s (%s) completed, result injected",
+                task.id,
+                task.name,
+            )
 
     def cancel_agent(self) -> None:
         if self.agent_task and not self.agent_task.done():
@@ -445,7 +498,7 @@ async def switch_mode(mode: str) -> dict:
         raise HTTPException(status_code=400, detail=f"未知权限模式: {mode}")
     if global_runtime is None:
         raise HTTPException(status_code=503, detail="服务尚未初始化，无活跃连接")
-    global_runtime.permission_checker.mode = new_mode
+    _set_runtime_mode(global_runtime, new_mode)
     return {"mode": new_mode.value}
 
 
@@ -677,12 +730,13 @@ async def ws_chat(websocket: WebSocket) -> None:
     前端 → 后端消息类型：
       {type: "send_message", text: "..."}
       {type: "permission_response", request_id: "...", decision: "allow|deny|allow_always"}
+      {type: "plan_decision", decision: "yolo|manual|feedback", feedback?: "..."}
       {type: "cancel"}
       {type: "switch_mode", mode: "..."}
       {type: "switch_session", session_id: "..."}
       {type: "new_session"}
       {type: "set_workdir", path: "..."}   # 切换工作目录，重建 runtime
-    后端 → 前端：见 event_to_dict + permission_request + done/cancelled/error
+    后端 → 前端：见 event_to_dict + permission_request + plan_ready + done/cancelled/error
                             + workdir_changed + engine_ready（带 work_dir）
     """
     await websocket.accept()
@@ -778,6 +832,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
+                # 后台任务可能在上一轮结束后才完成，发送下一条消息前再排空一次，
+                # 确保结果进入本轮上下文。
+                conn.drain_completed_tasks()
                 if conn.session is None and conn.session_manager is not None:
                     conn.session = conn.session_manager.create()
                     runtime.agent.session_id = conn.session.session_id
@@ -793,13 +850,51 @@ async def ws_chat(websocket: WebSocket) -> None:
                 ok = conn.resolve_permission(req_id, decision)
                 if not ok:
                     await conn.send_json({"type": "error", "message": f"未找到权限请求 {req_id}"})
+            elif mtype == "plan_decision":
+                decision = msg.get("decision", "")
+                feedback = (msg.get("feedback") or "").strip()
+                plan_path = runtime.agent._get_plan_path()
+                try:
+                    plan_content = plan_path.read_text(encoding="utf-8") if plan_path.is_file() else ""
+                except OSError as e:
+                    logger.warning("读取计划文件失败: %s", e)
+                    plan_content = ""
+                if decision == "feedback":
+                    if not feedback:
+                        await conn.send_json({"type": "error", "message": "反馈内容不能为空"})
+                        continue
+                    # 保持规划模式，继续让 Agent 修改当前计划。
+                    runtime.agent.enter_plan_mode()
+                    runtime.conversation.add_user_message(feedback)
+                    conn.history_cursor = len(runtime.conversation.history)
+                    await conn.run_agent(feedback)
+                elif decision in ("yolo", "manual"):
+                    if not plan_content.strip():
+                        await conn.send_json({
+                            "type": "error",
+                            "message": "计划文件不存在或为空，无法执行。请先让 Agent 写出计划，或选择反馈。",
+                        })
+                        continue
+                    target = (
+                        PermissionMode.BYPASS
+                        if decision == "yolo"
+                        else runtime.agent.pre_plan_mode or PermissionMode.DEFAULT
+                    )
+                    runtime.agent.exit_plan_mode(target)
+                    await conn.send_json({"type": "mode_changed", "mode": target.value})
+                    text = f"Execute this plan:\n\n{plan_content}"
+                    runtime.conversation.add_user_message(text)
+                    conn.history_cursor = len(runtime.conversation.history)
+                    await conn.run_agent(text)
+                else:
+                    await conn.send_json({"type": "error", "message": f"未知计划决定: {decision}"})
             elif mtype == "cancel":
                 conn.cancel_agent()
             elif mtype == "switch_mode":
                 mode_str = msg.get("mode", "")
                 try:
                     new_mode = PermissionMode(mode_str)
-                    runtime.permission_checker.mode = new_mode
+                    _set_runtime_mode(runtime, new_mode)
                     await conn.send_json({"type": "mode_changed", "mode": new_mode.value})
                 except ValueError:
                     await conn.send_json({"type": "error", "message": f"未知权限模式: {mode_str}"})

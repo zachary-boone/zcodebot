@@ -249,14 +249,18 @@ def partition_tool_calls(
     batches: list[ToolBatch] = []
     for tc in tool_calls:
         tool = registry.get(tc.tool_name)
-        safe = tool is not None and tool.is_concurrency_safe and registry.is_enabled(tc.tool_name)
+        enabled = tool is not None and registry.is_enabled(tc.tool_name)
+        safe = bool(enabled and tool.category == "read" and tool.is_concurrency_safe)
         # Agent calls are parallel only for named, isolated workers. Anonymous
         # forks share parent context and team spawns mutate shared coordination
         # state, so keep those sequential.
         if tc.tool_name == "Agent":
             agent_type = str(tc.arguments.get("subagent_type", "")).lower()
-            safe = agent_type in {"explore", "verification"} and not bool(
-                tc.arguments.get("team_name")
+            safe = (
+                enabled
+                and tool.is_concurrency_safe
+                and agent_type in {"explore", "verification"}
+                and not bool(tc.arguments.get("team_name"))
             )
 
         if safe and batches and batches[-1].concurrent:
@@ -336,6 +340,8 @@ class Agent:
         self.max_tokens_ceiling: int = _MAX_TOKENS_CEILING
         self.max_output_tokens_recoveries: int = _MAX_OUTPUT_TOKENS_RECOVERIES
         self.session_id: str = ""
+        # 进入规划模式前的权限模式，退出时恢复。
+        self.pre_plan_mode: PermissionMode | None = None
         self.active_skills: dict[str, str] = {}
         self._skill_catalog: str = ""
         self._agent_catalog: str = ""
@@ -382,6 +388,20 @@ class Agent:
         self.permission_mode = mode
         if self.permission_checker:
             self.permission_checker.mode = mode
+
+    def enter_plan_mode(self) -> None:
+        """进入规划模式并记录进入前的权限模式。"""
+        if self.permission_mode == PermissionMode.PLAN:
+            return
+        self.pre_plan_mode = self.permission_mode
+        self.set_permission_mode(PermissionMode.PLAN)
+
+    def exit_plan_mode(self, target: PermissionMode | None = None) -> PermissionMode:
+        """退出规划模式，默认恢复进入前的模式。"""
+        restore = target or self.pre_plan_mode or PermissionMode.DEFAULT
+        self.set_permission_mode(restore)
+        self.pre_plan_mode = None
+        return restore
 
     def activate_skill(self, name: str, prompt_body: str) -> None:
         self.active_skills[name] = prompt_body
@@ -770,8 +790,14 @@ class Agent:
                 )
                 break
 
+            exit_plan_ids = {
+                tc.tool_id for tc in response.tool_calls if tc.tool_name == "ExitPlanMode"
+            }
+            # 只有 ExitPlanMode 成功时才结束本轮；例如计划文件尚未写出时，
+            # 工具会返回错误，Agent 应继续工作而不是让桌面端弹出空计划。
             exit_plan_called = any(
-                tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
+                result.tool_use_id in exit_plan_ids and not result.is_error
+                for result in tool_results
             )
             conversation.add_tool_results_message(tool_results)
             if exit_plan_called:
@@ -873,6 +899,36 @@ class Agent:
         semaphore = asyncio.Semaphore(2)
 
         async def run_bounded(tc: ToolCallComplete) -> _ToolExecResult:
+            tool = self.registry.get(tc.tool_name)
+            if tool is not None and tool.category != "read" and tc.tool_name != "Agent":
+                log.error("非只读工具 %s 进入了无权限检查的并发批，已拒绝执行", tc.tool_name)
+                return _ToolExecResult(
+                    tool_id=tc.tool_id,
+                    tool_name=tc.tool_name,
+                    result=ToolResult(
+                        output="内部错误：该工具未经过权限确认，已拒绝执行",
+                        is_error=True,
+                    ),
+                    elapsed=0.0,
+                    is_unknown=False,
+                )
+            if tool is not None and tc.tool_name == "Agent":
+                agent_type = str(tc.arguments.get("subagent_type", "")).lower()
+                isolated = agent_type in {"explore", "verification"} and not bool(
+                    tc.arguments.get("team_name")
+                )
+                if not isolated:
+                    log.error("非隔离 Agent 进入了无权限检查的并发批，已拒绝执行")
+                    return _ToolExecResult(
+                        tool_id=tc.tool_id,
+                        tool_name=tc.tool_name,
+                        result=ToolResult(
+                            output="内部错误：该 Agent 未经过权限确认，已拒绝执行",
+                            is_error=True,
+                        ),
+                        elapsed=0.0,
+                        is_unknown=False,
+                    )
             async with semaphore:
                 return await self._execute_single_tool_direct(tc)
 
@@ -917,9 +973,14 @@ class Agent:
                         return
 
                     if response == PermissionResponse.ALLOW_ALWAYS:
-                        from codebot.permissions.rules import Rule, extract_content
+                        from codebot.permissions.rules import (
+                            Rule,
+                            extract_content,
+                            normalize_content,
+                        )
                         content = extract_content(tc.tool_name, tc.arguments)
-                        pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
+                        # 持久化授权只匹配这次完整内容；不再用通配后缀扩大授权范围。
+                        pattern = normalize_content(tc.tool_name, content)
                         rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
                         self.permission_checker.rule_engine.append_local_rule(rule)
 

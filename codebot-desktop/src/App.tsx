@@ -8,6 +8,7 @@ import { StatusBar } from "./components/StatusBar";
 import { MessageList } from "./components/MessageList";
 import { ChatInput } from "./components/ChatInput";
 import { PermissionDialog } from "./components/PermissionDialog";
+import { PlanDialog } from "./components/PlanDialog";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { WorkDirDialog } from "./components/WorkDirDialog";
@@ -18,10 +19,11 @@ function sameDir(a: string, b: string): boolean {
 }
 
 export default function App() {
-  const { sendMessage, cancel, respondPermission, switchMode, switchSession, newSession, setWorkDir } = useWebSocket();
+  const { sendMessage, cancel, respondPermission, decidePlan, switchMode, switchSession, newSession, setWorkDir } = useWebSocket();
   const isStreaming = useChatStore((s) => s.isStreaming);
   const engineStatus = useChatStore((s) => s.engineStatus);
   const pendingPermission = useChatStore((s) => s.pendingPermission);
+  const pendingPlan = useChatStore((s) => s.pendingPlan);
   const workDir = useChatStore((s) => s.workDir);
   const errorMessage = useChatStore((s) => s.errorMessage);
   const reset = useChatStore((s) => s.reset);
@@ -259,7 +261,7 @@ export default function App() {
           onSend={handleSend}
           onCancel={cancel}
           isStreaming={isStreaming}
-          disabled={disabled}
+          disabled={disabled || !!pendingPlan}
           insertText={insertText?.text}
           insertId={insertText?.id}
         />
@@ -268,6 +270,11 @@ export default function App() {
       {pendingPermission && (
         <PermissionDialog request={pendingPermission} onRespond={respondPermission} />
       )}
+      <PlanDialog
+        plan={pendingPlan}
+        onDecide={decidePlan}
+        onDismiss={() => useChatStore.getState().setPendingPlan(null)}
+      />
       {settingsOpen && (
         <SettingsPanel
           onClose={() => setSettingsOpen(false)}

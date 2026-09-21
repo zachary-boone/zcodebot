@@ -182,6 +182,11 @@ async def build_runtime(
         enable_coordinator_mode=config.enable_coordinator_mode,
     ))
     registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
+    from codebot.tools.exit_plan_mode import ExitPlanModeTool
+    registry.register(ExitPlanModeTool(
+        is_plan_mode=lambda: agent.plan_mode,
+        plan_exists=lambda: agent._get_plan_path().exists(),
+    ))
 
     # 团队/子 agent 完成通知的排空回调（与 CLI 保持一致）
     def drain_mailbox_only() -> list[str]:

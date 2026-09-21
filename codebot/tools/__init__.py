@@ -15,6 +15,11 @@ class ToolRegistry:
         self._discovered: set[str] = set()
 
     def register(self, tool: Tool) -> None:
+        if "category" not in type(tool).__dict__ and "category" not in tool.__dict__:
+            raise ValueError(
+                f"工具 {tool.name} 未显式声明 category。"
+                f"请在 {type(tool).__name__} 类体内声明 read、write 或 command。"
+            )
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool | None:

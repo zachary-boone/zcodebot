@@ -88,13 +88,14 @@ class TestDangerousCommandDetector:
         hit, _ = self.detector.detect("> /dev/sda")
         assert hit
 
-    def test_safe_git_push(self) -> None:
-        hit, _ = self.detector.detect("git push --force origin main")
-        assert not hit
+    def test_force_git_push_is_dangerous(self) -> None:
+        hit, reason = self.detector.detect("git push --force origin main")
+        assert hit
+        assert "强制" in reason
 
-    def test_safe_rm_file(self) -> None:
+    def test_recursive_rm_is_dangerous(self) -> None:
         hit, _ = self.detector.detect("rm -rf build/")
-        assert not hit
+        assert hit
 
     def test_safe_npm_test(self) -> None:
         hit, _ = self.detector.detect("npm test")
@@ -169,9 +170,9 @@ class TestPathSandbox:
 
 class TestRuleEngine:
     def test_parse_rule(self) -> None:
-        rule = parse_rule("Bash(git *)", "allow")
+        rule = parse_rule("Bash(git status)", "allow")
         assert rule.tool_name == "Bash"
-        assert rule.pattern == "git *"
+        assert rule.pattern == "git status"
         assert rule.effect == "allow"
 
     def test_parse_invalid(self) -> None:
@@ -179,17 +180,22 @@ class TestRuleEngine:
             parse_rule("invalid syntax", "allow")
 
     def test_rule_matches(self) -> None:
-        rule = Rule(tool_name="Bash", pattern="git *", effect="allow")
-        assert rule.matches("Bash", "git commit -m test")
-        assert rule.matches("Bash", "git push origin main")
-        assert not rule.matches("Bash", "npm test")
+        rule = Rule(tool_name="Bash", pattern="git status", effect="allow")
+        assert rule.matches("Bash", "git status")
+        assert not rule.matches("Bash", "git status --short")
+        assert not rule.matches("Bash", "git status; rm -rf ./build")
         assert not rule.matches("ReadFile", "git status")
 
     def test_rule_file_pattern(self) -> None:
-        rule = Rule(tool_name="ReadFile", pattern="*.env*", effect="deny")
+        rule = Rule(tool_name="ReadFile", pattern=".env", effect="deny")
         assert rule.matches("ReadFile", ".env")
-        assert rule.matches("ReadFile", ".env.local")
+        assert not rule.matches("ReadFile", ".env.local")
         assert not rule.matches("ReadFile", "main.py")
+
+    def test_directory_rule_matches_by_path_segment(self) -> None:
+        rule = Rule(tool_name="WriteFile", pattern="dir:src", effect="allow")
+        assert rule.matches("WriteFile", "src/app.py")
+        assert not rule.matches("WriteFile", "src2/app.py")
 
     def test_extract_content(self) -> None:
         assert extract_content("Bash", {"command": "ls -la"}) == "ls -la"
@@ -203,20 +209,36 @@ class TestRuleEngine:
         tmpdir = Path(tempfile.mkdtemp())
         rules_file = tmpdir / "rules.yaml"
         rules_file.write_text(yaml.dump([
-            {"rule": "Bash(git *)", "effect": "allow"},
-            {"rule": "Bash(rm *)", "effect": "deny"},
+            {"rule": "Bash(git commit -m x)", "effect": "allow"},
+            {"rule": "Bash(rm -rf ./build)", "effect": "deny"},
         ]))
         engine = RuleEngine(project_rules_path=rules_file)
         assert engine.evaluate("Bash", "git commit -m x") == "allow"
-        assert engine.evaluate("Bash", "rm -rf build") == "deny"
+        assert engine.evaluate("Bash", "rm -rf ./build") == "deny"
         assert engine.evaluate("Bash", "npm test") is None
+
+    def test_local_tier_overrides_project_and_user(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        user_file = tmpdir / "user.yaml"
+        project_file = tmpdir / "project.yaml"
+        local_file = tmpdir / "local.yaml"
+        rule = "Bash(git status)"
+        user_file.write_text(yaml.dump([{"rule": rule, "effect": "deny"}]))
+        project_file.write_text(yaml.dump([{"rule": rule, "effect": "deny"}]))
+        local_file.write_text(yaml.dump([{"rule": rule, "effect": "allow"}]))
+        engine = RuleEngine(
+            user_rules_path=user_file,
+            project_rules_path=project_file,
+            local_rules_path=local_file,
+        )
+        assert engine.evaluate("Bash", "git status") == "allow"
 
     def test_same_tier_last_wins(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
         rules_file = tmpdir / "rules.yaml"
         rules_file.write_text(yaml.dump([
-            {"rule": "Bash(git *)", "effect": "deny"},
-            {"rule": "Bash(git *)", "effect": "allow"},
+            {"rule": "Bash(git status)", "effect": "deny"},
+            {"rule": "Bash(git status)", "effect": "allow"},
         ]))
         engine = RuleEngine(project_rules_path=rules_file)
         assert engine.evaluate("Bash", "git status") == "allow"
@@ -226,13 +248,14 @@ class TestRuleEngine:
         user_file = tmpdir / "user.yaml"
         project_file = tmpdir / "project.yaml"
         user_file.write_text(yaml.dump([
-            {"rule": "Bash(rm *)", "effect": "deny"},
+            {"rule": "Bash(rm -rf ./build)", "effect": "deny"},
         ]))
         project_file.write_text(yaml.dump([
-            {"rule": "Bash(rm *)", "effect": "allow"},
+            {"rule": "Bash(rm -rf ./build)", "effect": "allow"},
         ]))
         engine = RuleEngine(user_rules_path=user_file, project_rules_path=project_file)
-        assert engine.evaluate("Bash", "rm -rf build/") == "deny"
+        # project 级比 user 级更具体，local 级（若存在）还会优先于二者。
+        assert engine.evaluate("Bash", "rm -rf ./build") == "allow"
 
     def test_missing_file_no_error(self) -> None:
         engine = RuleEngine(
@@ -245,9 +268,13 @@ class TestRuleEngine:
         tmpdir = Path(tempfile.mkdtemp())
         local_path = tmpdir / ".codebot" / "permissions.local.yaml"
         engine = RuleEngine(local_rules_path=local_path)
-        engine.append_local_rule(Rule(tool_name="Bash", pattern="git commit *", effect="allow"))
+        engine.append_local_rule(Rule(tool_name="Bash", pattern="git commit -m test", effect="allow"))
         assert local_path.exists()
         assert engine.evaluate("Bash", "git commit -m test") == "allow"
+        engine.append_local_rule(Rule(tool_name="Bash", pattern="git commit -m test", effect="allow"))
+        entries = yaml.safe_load(local_path.read_text(encoding="utf-8"))
+        assert len(entries) == 1
+        assert entries[0]["created_at"]
 
 # ===========================================================================
 # 第四层：PermissionMode（权限模式）
@@ -266,8 +293,8 @@ class TestPermissionMode:
 
     def test_plan_mode(self) -> None:
         assert mode_decide(PermissionMode.PLAN, "read") == "allow"
-        assert mode_decide(PermissionMode.PLAN, "write") == "deny"
-        assert mode_decide(PermissionMode.PLAN, "command") == "deny"
+        assert mode_decide(PermissionMode.PLAN, "write") == "ask"
+        assert mode_decide(PermissionMode.PLAN, "command") == "ask"
 
     def test_bypass_mode(self) -> None:
         assert mode_decide(PermissionMode.BYPASS, "read") == "allow"
@@ -327,12 +354,12 @@ class TestPermissionChecker:
         d = self.checker.check(tool, {"command": "npm test"})
         assert d.effect == "ask"
 
-    def test_plan_mode_denies_write(self) -> None:
+    def test_plan_mode_asks_for_write(self) -> None:
         from codebot.tools.write_file import WriteFile
         self.checker.mode = PermissionMode.PLAN
         tool = WriteFile()
         d = self.checker.check(tool, {"file_path": str(self.tmpdir / "x.txt"), "content": "hi"})
-        assert d.effect == "deny"
+        assert d.effect == "ask"
 
     def test_bypass_mode_allows_all(self) -> None:
         from codebot.tools.bash import Bash
@@ -353,7 +380,7 @@ class TestPermissionChecker:
         tmpdir = Path(tempfile.mkdtemp())
         rules_file = tmpdir / "rules.yaml"
         rules_file.write_text(yaml.dump([
-            {"rule": "Bash(git *)", "effect": "allow"},
+            {"rule": "Bash(git commit -m test)", "effect": "allow"},
         ]))
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
@@ -576,6 +603,9 @@ async def test_e2e_bypass_mode_allows_all():
 
     client = MockLLMClient([
         [
+            ToolCallComplete("t0", "ReadFile", {
+                "file_path": str(test_file),
+            }),
             ToolCallComplete("t1", "WriteFile", {
                 "file_path": str(test_file),
                 "content": "modified",
@@ -604,8 +634,8 @@ async def test_e2e_bypass_mode_allows_all():
 
     c = _collect(events)
     assert len(c["permission"]) == 0
-    assert len(c["tool_result"]) == 1
-    assert not c["tool_result"][0].is_error
+    assert len(c["tool_result"]) == 2
+    assert all(not result.is_error for result in c["tool_result"])
     assert test_file.read_text() == "modified"
 
 @pytest.mark.asyncio

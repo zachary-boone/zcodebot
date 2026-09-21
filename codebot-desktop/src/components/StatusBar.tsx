@@ -8,7 +8,7 @@ const MODES = [
   { value: "default", label: "默认（写入询问）" },
   { value: "acceptEdits", label: "自动接受编辑" },
   { value: "plan", label: "规划模式" },
-  { value: "bypass", label: "跳过所有检查" },
+  { value: "bypassPermissions", label: "跳过所有检查" },
 ];
 
 function getModeLabel(value: string): string {
@@ -38,6 +38,7 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
   const totalTokens = sessionUsage.input_tokens + sessionUsage.output_tokens;
   const theme = useThemeStore((s) => s.theme);
   const subAgentStatuses = useChatStore((s) => s.subAgentStatuses);
+  const isStreaming = useChatStore((s) => s.isStreaming);
   const toggleTheme = useThemeStore((s) => s.toggle);
 
   const [modeOpen, setModeOpen] = useState(false);
@@ -155,7 +156,7 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
                         {status.progress.last_activity && <span className="truncate">{status.progress.last_activity}</span>}
                       </div>
                       {status.status === "completed" && status.result && (
-                        <div className="mt-1 text-[10px] text-emerald-300/80 line-clamp-2">已返回结果，可由主 Agent 汇总</div>
+                        <div className="mt-1 text-[10px] text-emerald-300/80 line-clamp-2">结果已注入主 Agent 上下文</div>
                       )}
                     </div>
                   );
@@ -163,6 +164,13 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
               </div>
             )}
           </div>
+        )}
+
+        {isStreaming && (
+          <span className="flex items-center gap-1 text-accent" title="Agent 正在工作">
+            <Activity size={12} className="animate-pulse" />
+            工作中...
+          </span>
         )}
 
         {/* 连接状态 */}

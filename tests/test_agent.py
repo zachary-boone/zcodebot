@@ -410,6 +410,21 @@ async def test_plan_mode():
     assert "EditFile" in names
     assert "Bash" in names
 
+
+def test_plan_mode_transition_restores_previous_mode():
+    from codebot.permissions import PermissionMode
+
+    agent = Agent(MockLLMClient([]), create_default_registry(), "anthropic")
+    agent.set_permission_mode(PermissionMode.ACCEPT_EDITS)
+    agent.enter_plan_mode()
+    assert agent.plan_mode is True
+    assert agent.pre_plan_mode == PermissionMode.ACCEPT_EDITS
+    agent.enter_plan_mode()
+    assert agent.pre_plan_mode == PermissionMode.ACCEPT_EDITS
+    assert agent.exit_plan_mode() == PermissionMode.ACCEPT_EDITS
+    assert agent.permission_mode == PermissionMode.ACCEPT_EDITS
+    assert agent.permission_checker is None or agent.permission_checker.mode == PermissionMode.ACCEPT_EDITS
+
 @pytest.mark.asyncio
 async def test_plan_mode_denied_tool_returns_error():
     """在 plan 模式下，写入类工具需要审批（effect=ask）；当用户

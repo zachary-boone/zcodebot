@@ -6,7 +6,7 @@ from typing import Any
 
 from codebot.permissions.dangerous import DangerousCommandDetector, is_safe_command
 from codebot.permissions.modes import DecisionEffect, PermissionMode, mode_decide
-from codebot.permissions.rules import RuleEngine, extract_content
+from codebot.permissions.rules import RuleEngine, extract_content, normalize_content
 from codebot.permissions.sandbox import PathSandbox
 from codebot.tools.base import Tool
 
@@ -37,7 +37,7 @@ class PermissionChecker:
 
 
     def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
-        content = extract_content(tool.name, arguments)
+        content = normalize_content(tool.name, extract_content(tool.name, arguments))
 
         # Layer 0: Plan 模式例外放行
         if self.mode == PermissionMode.PLAN:
@@ -84,10 +84,10 @@ class PermissionChecker:
     def _is_plan_file(self, target_path: str) -> bool:
         if not target_path:
             return False
-        if ".codebot/plans/" in target_path:
+        if ".codebot\\plans\\" in target_path or ".codebot/plans/" in target_path:
             return True
         if not self.plan_file_path:
             return False
-        abs_target = os.path.normcase(os.path.abspath(target_path))
-        abs_plan = os.path.normcase(os.path.abspath(self.plan_file_path))
+        abs_target = normalize_content("WriteFile", target_path)
+        abs_plan = normalize_content("WriteFile", self.plan_file_path)
         return abs_target == abs_plan

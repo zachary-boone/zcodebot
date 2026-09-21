@@ -223,8 +223,7 @@ def build_plan_mode_reminder(
     if iteration == 1:
         return _PLAN_MODE_FULL_REMINDER.format(plan_file_info=plan_file_info)
 
-    attachment_index = (iteration - 1) // _REMINDER_INTERVAL
-    if attachment_index % _REMINDER_INTERVAL == 0:
+    if (iteration - 1) % _REMINDER_INTERVAL == 0:
         return _PLAN_MODE_FULL_REMINDER.format(plan_file_info=plan_file_info)
 
     return _PLAN_MODE_SPARSE_REMINDER.format(plan_path=plan_path)
