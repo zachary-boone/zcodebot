@@ -1,7 +1,8 @@
 // 单条消息渲染：区分 user / assistant
 import { memo, useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { CodeBlock, StreamingMarkdown } from "streaming-markdown-react";
-import { Check, Loader, Copy } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import { Check, Copy, Brain, ChevronDown, ChevronRight } from "lucide-react";
 import type { ChatMessage } from "../types";
 import { ToolCallBlock } from "./ToolCallBlock";
 
@@ -50,6 +51,9 @@ const markdownComponents = {
 function MessageBubbleBase({ message }: Props) {
   const isUser = message.role === "user";
   const isStreaming = message.status === "streaming";
+  // 当前执行中的消息默认展开，让用户无需切换会话就能看到实时过程；
+  // 历史消息保持折叠，避免重新打开会话时占满正文区域。
+  const [showThinking, setShowThinking] = useState(isStreaming);
 
   if (isUser) {
     return (
@@ -62,16 +66,37 @@ function MessageBubbleBase({ message }: Props) {
   }
 
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-1.5">
+      {(message.thinking || message.activity || isStreaming) && (
+        <div className="mb-2 max-w-[88ch] rounded-lg border border-border bg-bg-tertiary/70 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowThinking((value) => !value)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-bg-secondary transition-colors"
+          >
+            {showThinking ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            <Brain size={13} className="text-accent" />
+            <span>{message.activity || (isStreaming ? "正在工作" : "工作过程")}</span>
+          </button>
+          {showThinking && (
+            <div className="border-t border-border px-3 py-2 text-xs leading-6 text-text-tertiary whitespace-pre-wrap break-words max-h-56 overflow-y-auto">
+              {message.thinking || message.activity || "正在分析任务并准备执行…"}
+            </div>
+          )}
+        </div>
+      )}
       {/* Markdown 内容 */}
       {message.content && (
         <div className="markdown-body">
-          <StreamingMarkdown
-            status={isStreaming ? "streaming" : "success"}
-            components={markdownComponents}
-          >
-            {message.content}
-          </StreamingMarkdown>
+          {isStreaming ? (
+            <StreamingMarkdown status="streaming" components={markdownComponents}>
+              {message.content}
+            </StreamingMarkdown>
+          ) : (
+            <ReactMarkdown components={markdownComponents}>
+              {message.content}
+            </ReactMarkdown>
+          )}
           {/* 文本流式光标：内容边生成边显示闪烁光标，增强流式感 */}
           {isStreaming && message.content && <span className="stream-cursor" />}
         </div>
@@ -79,18 +104,10 @@ function MessageBubbleBase({ message }: Props) {
 
       {/* 工具调用块 */}
       {message.toolCalls.length > 0 && (
-        <div className="mt-2 space-y-1.5">
+        <div className="mt-1 space-y-1">
           {message.toolCalls.map((tc) => (
             <ToolCallBlock key={tc.tool_id} tool={tc} />
           ))}
-        </div>
-      )}
-
-      {/* 流式光标：还没内容时显示思考中占位 */}
-      {isStreaming && !message.content && (
-        <div className="flex items-center gap-2 text-text-tertiary text-sm">
-          <Loader size={14} className="animate-spin" />
-          <span>思考中...</span>
         </div>
       )}
 

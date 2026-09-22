@@ -29,6 +29,7 @@ interface ChatStore {
   startAssistantMessage: () => string; // 返回消息 id
   appendStreamText: (msgId: string, text: string) => void;
   appendThinking: (msgId: string, text: string) => void;
+  setActivity: (msgId: string, activity: string) => void;
   addToolUse: (msgId: string, tool: ToolCall) => void;
   updateToolResult: (msgId: string, toolId: string, result: Partial<ToolCall>) => void;
   setMessageUsage: (msgId: string, usage: { input_tokens: number; output_tokens: number }) => void;
@@ -88,7 +89,7 @@ export const useChatStore = create<ChatStore>((set) => ({
     set((state) => ({
       messages: [
         ...state.messages,
-        { id: genId(), role: "user", content: text, thinking: "", toolCalls: [], status: "complete" },
+        { id: genId(), role: "user", content: text, thinking: "", activity: "", toolCalls: [], status: "complete" },
       ],
     })),
   startAssistantMessage: () => {
@@ -96,7 +97,7 @@ export const useChatStore = create<ChatStore>((set) => ({
     set((state) => ({
       messages: [
         ...state.messages,
-        { id, role: "assistant", content: "", thinking: "", toolCalls: [], status: "streaming" },
+        { id, role: "assistant", content: "", thinking: "", activity: "准备开始工作…", toolCalls: [], status: "streaming" },
       ],
     }));
     return id;
@@ -110,8 +111,18 @@ export const useChatStore = create<ChatStore>((set) => ({
   appendThinking: (msgId, text) =>
     set((state) => ({
       messages: state.messages.map((m) =>
-        m.id === msgId ? { ...m, thinking: m.thinking + text } : m
+        m.id === msgId
+          ? {
+              ...m,
+              // 思考仅用于过程面板，设置上限避免长任务无限堆积内存。
+              thinking: (m.thinking + text).slice(-20000),
+            }
+          : m
       ),
+    })),
+  setActivity: (msgId, activity) =>
+    set((state) => ({
+      messages: state.messages.map((m) => (m.id === msgId ? { ...m, activity } : m)),
     })),
   addToolUse: (msgId, tool) =>
     set((state) => ({

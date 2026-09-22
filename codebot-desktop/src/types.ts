@@ -109,6 +109,8 @@ export interface ChatMessage {
   content: string;
   // 思考过程文本
   thinking: string;
+  // 当前轮次的工作阶段，仅用于过程展示，不参与最终答复。
+  activity?: string;
   // 关联的工具调用
   toolCalls: ToolCall[];
   // 状态

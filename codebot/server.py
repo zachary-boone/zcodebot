@@ -215,9 +215,9 @@ class SessionConnection:
                             await self._send_plan_ready()
                         self.drain_completed_tasks()
                     elif isinstance(event, ThinkingText):
-                        # 模型内部推理不是最终答复，不发送到桌面端，避免泄露
-                        # 思考内容并占据大量对话空间。
-                        continue
+                        # 思考内容只作为实时工作状态展示；前端不会把它写入最终正文，
+                        # 也不会把该事件单独持久化为最终答复。
+                        await self.send_json(event_to_dict(event))
                     else:
                         await self.send_json(event_to_dict(event))
                 self.persist_history_since_cursor()
@@ -606,6 +606,15 @@ async def get_session_messages(session_id: str) -> dict:
     try:
         messages = []
         for m in result.messages:
+            # system-reminder 是发给模型的内部上下文，不是用户消息。
+            # 旧会话中它们以 user record 形式落盘，切换会话时必须过滤，
+            # 否则 Plan 提示、环境信息等英文会被误显示在聊天窗口。
+            if m.role == "user" and m.content.lstrip().startswith("<system-reminder>"):
+                continue
+            # 工具结果消息在内部是 user role + 空正文；工具结果已由前一条
+            # assistant 的 tool_uses 表示，不能再生成一个空白聊天气泡。
+            if m.role == "user" and not m.content.strip() and not m.tool_uses:
+                continue
             msg = {
                 "role": m.role,
                 "content": m.content,

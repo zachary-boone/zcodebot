@@ -80,6 +80,7 @@ export default function App() {
             role: m.role as "user" | "assistant",
             content: m.content,
             thinking: m.thinking || "",
+            activity: "",
             toolCalls: (m.tool_uses || []).map((tu) => ({
               tool_id: tu.tool_id,
               tool_name: tu.tool_name,
@@ -175,6 +176,7 @@ export default function App() {
 - 侧栏"文件"标签可浏览项目文件，点击插入 @引用
 - 顶部状态栏点击文件夹图标可**切换工作目录**，引擎会在新目录下重建（会话按目录隔离）`,
             thinking: "",
+            activity: "",
             toolCalls: [],
             status: "complete" as const,
           },

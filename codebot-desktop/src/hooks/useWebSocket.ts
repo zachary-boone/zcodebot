@@ -75,7 +75,11 @@ export function useWebSocket() {
           }
           break;
         case "thinking":
-          // 推理内容不是最终答复，也不应占用对话区域；直接忽略。
+          // 过程内容只进入当前消息的工作区，最终正文仍只来自 stream_text。
+          if (currentAssistantId.current) {
+            store.appendThinking(currentAssistantId.current, msg.text);
+            store.setActivity(currentAssistantId.current, "正在分析任务…");
+          }
           break;
         case "tool_use": {
           if (currentAssistantId.current) {
@@ -86,6 +90,7 @@ export function useWebSocket() {
               status: "running",
             };
             store.addToolUse(currentAssistantId.current, tool);
+            store.setActivity(currentAssistantId.current, `正在执行 ${msg.tool_name}…`);
           }
           break;
         }
@@ -98,6 +103,10 @@ export function useWebSocket() {
               truncated: msg.truncated,
               status: msg.is_error ? "error" : "complete",
             });
+            store.setActivity(
+              currentAssistantId.current,
+              msg.is_error ? `${msg.tool_name} 执行失败` : `${msg.tool_name} 已完成，继续处理…`
+            );
           }
           break;
         case "usage":
@@ -134,6 +143,7 @@ export function useWebSocket() {
           // 结束前 flush 流式缓冲，确保最后一段内容不丢失
           flushStreamText();
           if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "工作完成");
             store.completeMessage(currentAssistantId.current, "complete");
             currentAssistantId.current = null;
           }
@@ -143,6 +153,7 @@ export function useWebSocket() {
         case "cancelled":
           flushStreamText();
           if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "已取消");
             store.completeMessage(currentAssistantId.current, "complete");
             currentAssistantId.current = null;
           }
@@ -183,6 +194,7 @@ export function useWebSocket() {
         case "error":
           flushStreamText();
           if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "执行失败");
             store.completeMessage(currentAssistantId.current, "error");
             currentAssistantId.current = null;
           }
@@ -193,7 +205,15 @@ export function useWebSocket() {
           // 简单提示，暂不做倒计时 UI
           break;
         case "turn_complete":
+          if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "正在整理当前步骤…");
+          }
+          break;
         case "loop_complete":
+          if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "正在整理最终结果…");
+          }
+          break;
         case "compact":
         case "hook":
           // MVP 阶段先忽略这些次要事件
