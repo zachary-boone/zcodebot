@@ -763,14 +763,6 @@ async def auto_compact(
 
     messages_for_summary = build_messages(list(to_summarize), protocol)
 
-    summary_messages: list[dict[str, Any]] = [
-        {"role": "user", "content": SUMMARY_PROMPT},
-    ]
-    summary_messages.extend(messages_for_summary)
-    summary_messages.append(
-        {"role": "user", "content": "请根据以上对话生成结构化摘要。记住：不要调用任何工具。"}
-    )
-
     summary_conv = ConversationManager()
     summary_conv.history = [
         Message(role="user", content=SUMMARY_PROMPT),
@@ -800,7 +792,7 @@ async def auto_compact(
 
         except Exception as e:
             err_msg = str(e).lower()
-            if "prompt" in err_msg and "long" in err_msg or "too many" in err_msg:
+            if "prompt" in err_msg and ("long" in err_msg or "too many" in err_msg):
                 groups = _group_messages_by_turn(summary_conv.history[1:-1])
                 drop_count = max(1, len(groups) // 5)
                 remaining = groups[drop_count:]

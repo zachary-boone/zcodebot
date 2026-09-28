@@ -19,11 +19,11 @@
 --------------------------------------------------------------------------------
 
   # 方式 A：从 GitHub 克隆（如果仓库可访问）
-  git clone https://github.com/1144zhang/terminal-codebot.git
-  cd terminal-codebot
+  git clone https://github.com/zachary-boone/zcodebot.git
+  cd zcodebot
 
   # 方式 B：已有本地代码，直接进入项目根目录
-  cd /你的/项目/路径/terminal-codebot
+  cd /你的/项目/路径/zcodebot
 
   # 后续所有命令都在项目根目录下执行（即包含 pyproject.toml 的目录）
 
@@ -252,8 +252,8 @@
 
   # 一行接一行执行（Windows CMD + Anthropic 为例）：
 
-  git clone https://github.com/1144zhang/terminal-codebot.git
-  cd terminal-codebot
+  git clone https://github.com/zachary-boone/zcodebot.git
+  cd zcodebot
   uv venv
   .venv\Scripts\activate
   uv pip install -e .
@@ -264,8 +264,8 @@
 
   # Linux / macOS 等价命令：
 
-  git clone https://github.com/1144zhang/terminal-codebot.git
-  cd terminal-codebot
+  git clone https://github.com/zachary-boone/zcodebot.git
+  cd zcodebot
   uv venv
   source .venv/bin/activate
   uv pip install -e .

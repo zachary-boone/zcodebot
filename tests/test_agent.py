@@ -1,8 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-
 """Agent Loop 的集成测试 —— 以编程方式逐项验证 checklist。"""
 from __future__ import annotations
 
@@ -211,7 +206,7 @@ async def test_stop_max_iterations():
 
     c = _collect(events)
     assert len(c["error"]) == 1
-    assert "maximum iterations" in c["error"][0].message
+    assert "最大迭代次数" in c["error"][0].message
 
 @pytest.mark.asyncio
 async def test_stop_cancel():
@@ -285,7 +280,7 @@ async def test_stop_consecutive_unknown_tools():
 
     c = _collect(events)
     assert len(c["error"]) == 1
-    assert "unknown tool" in c["error"][0].message
+    assert "未知工具" in c["error"][0].message
 
 @pytest.mark.asyncio
 async def test_message_splicing():
@@ -409,6 +404,21 @@ async def test_plan_mode():
     assert "WriteFile" in names
     assert "EditFile" in names
     assert "Bash" in names
+
+
+def test_plan_mode_transition_restores_previous_mode():
+    from codebot.permissions import PermissionMode
+
+    agent = Agent(MockLLMClient([]), create_default_registry(), "anthropic")
+    agent.set_permission_mode(PermissionMode.ACCEPT_EDITS)
+    agent.enter_plan_mode()
+    assert agent.plan_mode is True
+    assert agent.pre_plan_mode == PermissionMode.ACCEPT_EDITS
+    agent.enter_plan_mode()
+    assert agent.pre_plan_mode == PermissionMode.ACCEPT_EDITS
+    assert agent.exit_plan_mode() == PermissionMode.ACCEPT_EDITS
+    assert agent.permission_mode == PermissionMode.ACCEPT_EDITS
+    assert agent.permission_checker is None or agent.permission_checker.mode == PermissionMode.ACCEPT_EDITS
 
 @pytest.mark.asyncio
 async def test_plan_mode_denied_tool_returns_error():

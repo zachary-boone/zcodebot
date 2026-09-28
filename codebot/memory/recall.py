@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
 import json
@@ -21,6 +17,13 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 MAX_MEMORY_FILES = 200
+# 扫描上限（语义检索路径用）。
+#
+# MAX_MEMORY_FILES 的作用是限制**喂给 LLM 的清单长度**（否则 prompt 会随记忆
+# 数量无限增长），但它原先被直接用在扫描阶段、且按目录各截断一次，结果是
+# 超过 200 条的记忆连向量索引都进不去——召回范围被性能保护误伤。
+# 现在两者分开：扫描上限管覆盖面，清单上限管 prompt 长度。
+MAX_SCAN_FILES = 2000
 FRONTMATTER_MAX_LINES = 30
 ENTRYPOINT_NAME = "MEMORY.md"
 VALID_TYPES = {"user", "feedback", "project", "reference"}
@@ -143,16 +146,45 @@ def parse_frontmatter(content: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Scanning
+# Scanning (with mtime-based cache)
 # ---------------------------------------------------------------------------
 
-def scan_memory_files(memory_dir: Path, scope: str) -> list[MemoryHeader]:
+# 缓存：key=(str(memory_dir), scope, limit), value=(dir_mtime, results, timestamp)
+_scan_cache: dict[tuple[str, str, int], tuple[float, list[MemoryHeader], float]] = {}
+_SCAN_CACHE_TTL = 60.0  # 秒，兜底过期时间
+
+
+def scan_memory_files(
+    memory_dir: Path,
+    scope: str,
+    limit: int | None = None,
+) -> list[MemoryHeader]:
     """Walk memory_dir for .md files (excluding MEMORY.md), read frontmatter
     from each, and return a header list sorted newest-first, capped at
-    MAX_MEMORY_FILES.
+    ``limit``（默认 MAX_MEMORY_FILES；语义检索路径会传入 MAX_SCAN_FILES）。
+
+    结果按目录 mtime 缓存：目录未变化时直接返回缓存，避免重复扫描。
     """
     if not memory_dir.is_dir():
         return []
+
+    if limit is None:
+        limit = MAX_MEMORY_FILES
+
+    cache_key = (str(memory_dir), scope, limit)
+    now = time.time()
+
+    # 检查缓存：目录 mtime 未变且未过 TTL → 直接返回
+    try:
+        dir_mtime = memory_dir.stat().st_mtime
+    except OSError:
+        dir_mtime = 0.0
+
+    cached = _scan_cache.get(cache_key)
+    if cached is not None:
+        cached_mtime, cached_results, cached_time = cached
+        if cached_mtime == dir_mtime and (now - cached_time) < _SCAN_CACHE_TTL:
+            return cached_results
 
     md_files: list[Path] = []
     try:
@@ -170,8 +202,11 @@ def scan_memory_files(memory_dir: Path, scope: str) -> list[MemoryHeader]:
 
     # Sort newest-first.
     results.sort(key=lambda h: h.mtime_ms, reverse=True)
-    if len(results) > MAX_MEMORY_FILES:
-        results = results[:MAX_MEMORY_FILES]
+    if len(results) > limit:
+        results = results[:limit]
+
+    # 更新缓存
+    _scan_cache[cache_key] = (dir_mtime, results, now)
     return results
 
 
@@ -256,12 +291,23 @@ async def find_relevant_memories(
     语义检索（第一期 RAG 优化）：
       若传入 semantic_index 且可用，优先走 embedding 相似度检索，
       省一次 LLM 调用且基于正文语义；不可用或失败则回退到 LLM 选择器。
+
+    候选集上限：
+      语义检索可用时扫描上限放宽到 MAX_SCAN_FILES（向量索引需要覆盖全部记忆）；
+      喂给 LLM 的清单仍由 _select_relevant_memories 截断到 MAX_MEMORY_FILES。
     """
+    semantic_ready = semantic_index is not None and semantic_index.is_available()
+    scan_limit = MAX_SCAN_FILES if semantic_ready else MAX_MEMORY_FILES
+
     all_headers: list[MemoryHeader] = []
     if user_mem_dir is not None:
-        all_headers.extend(scan_memory_files(user_mem_dir, "user"))
+        all_headers.extend(scan_memory_files(user_mem_dir, "user", limit=scan_limit))
     if project_mem_dir is not None:
-        all_headers.extend(scan_memory_files(project_mem_dir, "project"))
+        all_headers.extend(scan_memory_files(project_mem_dir, "project", limit=scan_limit))
+
+    # 两个目录合并后按时间统一排序。否则 user 目录会整体排在 project 前面，
+    # 一旦清单被截断，project 侧的记忆就永远进不了候选。
+    all_headers.sort(key=lambda h: h.mtime_ms, reverse=True)
 
     surfaced = already_surfaced or set()
     candidates = [m for m in all_headers if m.file_path not in surfaced]
@@ -269,7 +315,7 @@ async def find_relevant_memories(
         return []
 
     # 优先语义检索（embedding 可用时）
-    if semantic_index is not None and semantic_index.is_available():
+    if semantic_ready:
         try:
             await semantic_index.ensure(candidates)
             selected_paths = await semantic_index.search(query)
@@ -310,7 +356,13 @@ async def _select_relevant_memories(
     recent_tools: list[str] | None,
     selector: SelectorFn,
 ) -> list[str]:
-    """Format manifest, call selector, parse JSON, return valid filenames."""
+    """Format manifest, call selector, parse JSON, return valid filenames.
+
+    清单长度在调用选择器前截断到 MAX_MEMORY_FILES：候选集可能很大（语义检索
+    路径最多扫 MAX_SCAN_FILES 条），但喂给 LLM 的 prompt 必须保持有界。
+    memories 已按 mtime 从新到旧排好，截断后保留最新的那批。
+    """
+    memories = memories[:MAX_MEMORY_FILES]
     valid_filenames = {m.filename for m in memories}
 
     manifest = format_memory_manifest(memories)

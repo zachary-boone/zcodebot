@@ -1,8 +1,4 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import os
@@ -57,11 +53,9 @@ from codebot.memory import (
     MemoryManager,
     Session,
     SessionManager,
-    find_relevant_memories,
     generate_session_summary,
     load_instructions,
     make_compact_boundary,
-    render_reminder,
 )
 from codebot.permissions import (
     DangerousCommandDetector,
@@ -130,7 +124,8 @@ def expand_at_refs(text: str, work_dir: str) -> str:
         if not os.path.isfile(full_path):
             return m.group(0)
         try:
-            content = open(full_path, encoding="utf-8", errors="replace").read(MAX_AT_REF_BYTES)
+            with open(full_path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read(MAX_AT_REF_BYTES)
             return f"[File: {rel_path}]\n```\n{content}\n```"
         except Exception:
             return m.group(0)
@@ -427,13 +422,14 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def _to_past_tense(verb: str) -> str:
-    """把现在进行时动词转换为过去式。"""
+    """把现在进行时动词转换为过去式（简化版，覆盖 THINKING_VERBS 常见模式）。"""
     if verb.endswith("ing"):
         stem = verb[:-3]
         if stem.endswith("e"):
             return stem + "d"
-        if stem and stem[-1] in "atutitet":
-            return stem + "ed"
+        # 双辅音结尾（如 run→running, sit→sitting）：去一个辅音再加 ed
+        if len(stem) >= 2 and stem[-1] == stem[-2] and stem[-1] not in "aeiouwxy":
+            return stem[:-1] + "ed"
         return stem + "ed"
     return verb + "ed"
 
@@ -580,9 +576,11 @@ class CodeBotApp(App):
         teammate_mode: str = "",
         enable_coordinator_mode: bool = False,
         driver_class: type | None = None,
+        embedding_provider: ProviderConfig | None = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
+        self._embedding_provider = embedding_provider
         self._initial_permission_mode = permission_mode
         self._mcp_server_configs = mcp_servers or []
         self.hook_engine = hook_engine
@@ -612,8 +610,9 @@ class CodeBotApp(App):
         self.session_manager: SessionManager | None = None
         self.session: Session | None = None
         self.memory_manager: MemoryManager | None = None
-        # RAG 第一期：记忆语义检索索引（懒加载，embedding 可用时替代 LLM 选择器）
-        self._semantic_memory_index = None
+        # 记忆召回器（懒加载，按 provider 缓存；实现见 codebot/memory/reminder.py）
+        self._memory_reminder = None
+        self._memory_reminder_provider: ProviderConfig | None = None
         self._instructions_content: str = ""
         self.command_registry = CommandRegistry()
         register_all_commands(self.command_registry)
@@ -950,11 +949,9 @@ class CodeBotApp(App):
         if self.agent is None:
             return
         if enabled:
-            self._pre_plan_mode = self.agent.permission_mode
-            self.agent.set_permission_mode(PermissionMode.PLAN)
+            self.agent.enter_plan_mode()
         else:
-            restore = getattr(self, "_pre_plan_mode", PermissionMode.DEFAULT)
-            self.agent.set_permission_mode(restore)
+            self.agent.exit_plan_mode()
         self._update_mode_label()
 
     def get_token_count(self) -> tuple[int, int]:
@@ -1124,7 +1121,12 @@ class CodeBotApp(App):
         except ValueError:
             idx = 0
         next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-        self.agent.set_permission_mode(next_mode)
+        if next_mode == PermissionMode.PLAN:
+            self.agent.enter_plan_mode()
+        elif current == PermissionMode.PLAN:
+            self.agent.exit_plan_mode(next_mode)
+        else:
+            self.agent.set_permission_mode(next_mode)
         self._update_mode_label()
 
     def action_toggle_tool_blocks(self) -> None:
@@ -1169,71 +1171,49 @@ class CodeBotApp(App):
                     return
             self._agent_task.cancel()
 
-    async def _prefetch_relevant_memories(self, query: str) -> str:
-        """Run the recall selector as a side-query with an 8s timeout.
+    def _memory_reminder_builder(self):
+        """按当前 provider 缓存 MemoryReminder；切换 provider 时重建。
 
-        Creates a fresh LLM client so the selector's system prompt is
-        independent of the main conversation's system prompt. Returns the
-        rendered system-reminder body, or "" on any failure / timeout.
+        chat provider 会被 LLM 选择器兜底路径用到，所以切换后必须重建，
+        否则会拿着旧 provider 去打旧端点。
         """
-        if self.memory_manager is None or self._selected_provider is None:
-            return ""
-
         provider = self._selected_provider
-        user_dir = self.memory_manager.user_mem_dir
-        project_dir = self.memory_manager.project_mem_dir
-
-        # RAG 第一期：优先用语义检索（embedding 可用时）
-        # 懒加载 SemanticMemoryIndex——只有第一次用到时才创建 embedding provider
-        semantic_index = self._get_semantic_memory_index(provider)
-
-        async def selector(system_prompt: str, user_message: str) -> str:
-            from codebot.tools.base import StreamEnd, TextDelta
-
-            side_client = create_client(provider)
-            mini_conv = ConversationManager()
-            mini_conv.history = [Message(role="user", content=user_message)]
-            collected = ""
-            async for event in side_client.stream(mini_conv, system=system_prompt):
-                if isinstance(event, TextDelta):
-                    collected += event.text
-                elif isinstance(event, StreamEnd):
-                    pass
-            return collected
-
-        try:
-            results = await asyncio.wait_for(
-                find_relevant_memories(
-                    query=query,
-                    user_mem_dir=user_dir,
-                    project_mem_dir=project_dir,
-                    recent_tools=None,
-                    already_surfaced=None,
-                    selector=selector,
-                    semantic_index=semantic_index,
-                ),
-                timeout=8.0,
-            )
-            return render_reminder(results)
-        except (asyncio.TimeoutError, Exception):
-            return ""
-
-    def _get_semantic_memory_index(self, provider: ProviderConfig):
-        """懒加载记忆语义索引。embedding 不可用时返回 None（上层回退 LLM 选择器）。"""
-        if self._semantic_memory_index is not None:
-            return self._semantic_memory_index
-        try:
-            from codebot.rag import create_embedding_provider
-            from codebot.memory.semantic_recall import SemanticMemoryIndex
-
-            embedder = create_embedding_provider(provider)
-            if not embedder.is_available():
-                return None  # 协议不支持 / key 缺失 → 走 LLM 选择器
-            self._semantic_memory_index = SemanticMemoryIndex(embedder)
-            return self._semantic_memory_index
-        except Exception:
-            # 任何初始化失败都静默降级——RAG 是增强，不是依赖
+        if provider is None or self.memory_manager is None:
             return None
+        if self._memory_reminder is None or self._memory_reminder_provider is not provider:
+            from codebot.memory.reminder import MemoryReminder
+
+            self._memory_reminder = MemoryReminder(
+                work_dir=getattr(self.agent, "work_dir", None) or os.getcwd(),
+                chat_provider=provider,
+                embedding_provider=self._embedding_provider,
+                memory_manager=self.memory_manager,
+            )
+            self._memory_reminder_provider = provider
+        return self._memory_reminder
+
+    async def _prefetch_relevant_memories(self, query: str) -> str:
+        """按 query 召回相关记忆，返回可注入对话的 system-reminder 文本。
+
+        实现收敛在 codebot/memory/reminder.py，与桌面端 server.py 共用同一份——
+        此前 provider 解析在 app.py / runtime.py 各写一份，其中一份传错 provider，
+        导致语义召回长期静默失效。超时或任何失败都返回空字符串。
+        """
+        builder = self._memory_reminder_builder()
+        if builder is None:
+            return ""
+        return await builder.build(query)
+
+    def _resolve_embedding_provider(self, provider: ProviderConfig) -> ProviderConfig:
+        """选择 embedding 用的 provider。
+
+        优先用配置里的 ``embedding_provider``（embedding 模型常常和聊天模型来自
+        不同厂商，比如聊天用 DeepSeek、向量化用 Qwen）；未配置时才回退到当前
+        聊天 provider。此前的写法是直接用聊天 provider，等于把配置里的
+        embedding_provider 整个忽略掉——拿聊天模型名去打聊天厂商的 embedding
+        端点，必然 404。这里的取法与 runtime.py（桌面端）保持一致。
+        """
+        return self._embedding_provider or provider
 
     def _get_embedder(self, provider: ProviderConfig):
         """懒加载共享的 EmbeddingProvider（供 ToolSearch 语义匹配等复用）。
@@ -1243,10 +1223,13 @@ class CodeBotApp(App):
         if not hasattr(self, "_shared_embedder"):
             try:
                 from codebot.rag import create_embedding_provider
-                self._shared_embedder = create_embedding_provider(provider)
+                self._shared_embedder = create_embedding_provider(
+                    self._resolve_embedding_provider(provider)
+                )
                 if not self._shared_embedder.is_available():
                     self._shared_embedder = None
-            except Exception:
+            except Exception as e:
+                log.debug("Shared embedder init failed (degraded): %s", e)
                 self._shared_embedder = None
         return self._shared_embedder
 
@@ -1255,14 +1238,17 @@ class CodeBotApp(App):
 
         链路：EmbeddingProvider → QdrantCodeStore → IncrementalIndexer → CodeSearch
         任一环节不可用（依赖未装/key 缺失）都静默降级，CodeSearch 保留降级提示能力。
+        
+        优化：集成 QueryRewriter，支持中文查询重写，提高 BM25 命中率。
         """
         try:
             from codebot.rag import create_embedding_provider
             from codebot.rag.qdrant_store import create_code_store
             from codebot.rag.indexer import IncrementalIndexer
+            from codebot.rag.query_rewriter import QueryRewriter
             from codebot.tools.code_search import CodeSearch
 
-            embedder = create_embedding_provider(provider)
+            embedder = create_embedding_provider(self._resolve_embedding_provider(provider))
             if not embedder.is_available():
                 return  # embedding 不可用 → CodeSearch 保持降级态
 
@@ -1273,17 +1259,28 @@ class CodeBotApp(App):
 
             indexer = IncrementalIndexer(work_dir, store)
 
-            # 用带 indexer/embedder 的 CodeSearch 覆盖默认降级版
-            code_search = CodeSearch(indexer=indexer, embedder=embedder)
+            # 初始化查询重写器（优化中文查询匹配英文代码）
+            query_rewriter = QueryRewriter(
+                llm_client=self.agent.llm if hasattr(self, "agent") and self.agent else None,
+                cache_ttl=3600,
+                enable_local_mapping=True,
+                enable_llm_rewrite=True,
+            )
+
+            # 用带 indexer/embedder/query_rewriter 的 CodeSearch 覆盖默认降级版
+            code_search = CodeSearch(
+                indexer=indexer,
+                embedder=embedder,
+                query_rewriter=query_rewriter,
+            )
             self.registry.register(code_search)
 
             # 启动后台预热：在用户和 Agent 对话的间隙静默建索引，
             # 用户第一次调 CodeSearch 时索引大概率已建好，消除 30-60 秒等待。
             # 失败不影响主流程——execute 里有 rebuild_if_needed 兜底。
             indexer.start_background_warmup()
-        except Exception:
-            # RAG 是增强，任何失败都不影响主流程
-            pass
+        except Exception as e:
+            log.debug("RAG code search init failed (degraded): %s", e)
 
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
         assert self.agent is not None
@@ -1613,17 +1610,20 @@ class CodeBotApp(App):
             except Exception:
                 pass
 
-        pre = getattr(self, "_pre_plan_mode", PermissionMode.DEFAULT)
         if choice == PlanChoice.YOLO:
-            self.agent.set_permission_mode(PermissionMode.BYPASS)
+            if not plan_content.strip():
+                self._show_system_message("计划文件不存在或为空，无法执行")
+                return
+            self.agent.exit_plan_mode(PermissionMode.BYPASS)
             self._update_mode_label()
-            if plan_content:
-                self.send_user_message(f"Execute this plan:\n\n{plan_content}")
+            self.send_user_message(f"Execute this plan:\n\n{plan_content}")
         elif choice == PlanChoice.MANUAL:
-            self.agent.set_permission_mode(pre)
+            if not plan_content.strip():
+                self._show_system_message("计划文件不存在或为空，无法执行")
+                return
+            self.agent.exit_plan_mode()
             self._update_mode_label()
-            if plan_content:
-                self.send_user_message(f"Execute this plan:\n\n{plan_content}")
+            self.send_user_message(f"Execute this plan:\n\n{plan_content}")
         elif choice == PlanChoice.FEEDBACK:
             if feedback:
                 self.send_user_message(feedback)

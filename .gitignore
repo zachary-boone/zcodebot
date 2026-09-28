@@ -24,10 +24,10 @@ codebot-desktop/codebot.log
 # 临时文件
 commit_msg.txt
 
-# CodeBot 运行时产物
-.codebot/sessions/
-.codebot/debug.log
-.codebot/history
+# CodeBot 运行时产物（整个目录都是本机状态，不进版本控制）
+# 注意：这里必须是 .codebot/ —— 之前误写成 .codebot/sessions/（复数），
+# 而实际目录是 session/（单数），导致会话工具结果、向量库、本地权限规则都会被提交。
+.codebot/
 
 # WorkBuddy 工作区记忆（本地，不提交）
 .workbuddy/

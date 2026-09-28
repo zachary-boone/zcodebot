@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
@@ -8,8 +8,15 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-VALID_MODELS = {"inherit", "sonnet", "opus", "haiku", ""}
-VALID_PERMISSION_MODES = {"default", "acceptEdits", "dontAsk", ""}
+VALID_MODELS = {"inherit", "sonnet", "opus", "haiku", "flash", "pro", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", ""}
+VALID_PERMISSION_MODES = {
+    "default",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+    "dontAsk",
+    "",
+}
 
 
 class AgentParseError(Exception):
@@ -117,3 +124,5 @@ def parse_agent_file(path: Path) -> AgentDef:
         file_path=path,
         source="builtin",
     )
+
+

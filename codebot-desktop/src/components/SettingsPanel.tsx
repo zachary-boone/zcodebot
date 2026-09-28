@@ -9,7 +9,7 @@ const MODES = [
   { value: "default", label: "默认（写入询问）" },
   { value: "acceptEdits", label: "自动接受编辑" },
   { value: "plan", label: "规划模式" },
-  { value: "bypass", label: "跳过所有检查" },
+  { value: "bypassPermissions", label: "跳过所有检查" },
 ];
 
 const PROTOCOL_LABELS: Record<string, string> = {

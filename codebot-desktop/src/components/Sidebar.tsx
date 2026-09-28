@@ -1,5 +1,5 @@
-// 侧栏：会话列表 + Memory 笔记 + Skills + 设置入口
-import { useState, useEffect, useCallback, memo } from "react";
+// 侧栏：会话列表（按工作目录分组）+ Memory 笔记 + Skills + 设置入口
+import { useState, useEffect, useCallback, memo, useRef } from "react";
 import {
   Plus,
   MessageSquare,
@@ -15,12 +15,12 @@ import {
   AlertCircle,
 } from "lucide-react";
 import {
-  fetchSessions,
+  fetchSessionGroups,
   deleteSession,
   fetchMemory,
   fetchSkills,
-  groupSessionsByDate,
   type SessionMeta,
+  type SessionGroup,
   type MemoryItem,
   type SkillItem,
   type FileEntry,
@@ -34,13 +34,22 @@ interface Props {
   onNewSession: () => void;
   onOpenSettings: () => void;
   onClose: () => void;
-  onSwitchSession: (sessionId: string) => void;
+  onSwitchSession: (sessionId: string, dir: string) => void;
   onInsertFile: (path: string) => void;
+}
+
+// 从绝对路径取目录名（兼容 / 与 \）
+function dirBasename(dir: string): string {
+  const parts = dir.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || dir;
 }
 
 export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onClose, onSwitchSession, onInsertFile }: Props) {
   const [tab, setTab] = useState<Tab>("sessions");
-  const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  // 会话按目录分组；每个目录默认展开（首次加载后全部展开）
+  const [groups, setGroups] = useState<SessionGroup[]>([]);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const expandedInited = useRef(false);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -48,15 +57,22 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
   // 待删除确认的会话。不用 window.confirm()——原生模态对话框在无 GPU / 沙箱的
   // Electron 环境会同步阻塞渲染进程且不返回，导致整个界面卡死、输入栏无法输入、
   // 删除请求发不出去。改用应用内 HTML 确认弹层。
-  const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ session: SessionMeta; dir: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      if (tab === "sessions") setSessions(await fetchSessions());
-      else if (tab === "memory") setMemories(await fetchMemory());
+      if (tab === "sessions") {
+        const gs = await fetchSessionGroups();
+        setGroups(gs);
+        // 首次加载默认全部展开
+        if (!expandedInited.current && gs.length > 0) {
+          expandedInited.current = true;
+          setExpandedDirs(new Set(gs.map((g) => g.dir)));
+        }
+      } else if (tab === "memory") setMemories(await fetchMemory());
       else if (tab === "skills") setSkills(await fetchSkills());
     } catch (e) {
       console.error("sidebar refresh failed", e);
@@ -75,10 +91,17 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
     return () => window.removeEventListener("codebot:sessions-changed", onSessionsChanged);
   }, [refresh]);
 
-  const handleDelete = async (id: string) => {
-    // 弹出应用内确认层（替代 window.confirm）
-    const target = sessions.find((s) => s.id === id);
-    if (target) setPendingDelete(target);
+  const toggleDir = (dir: string) => {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(dir)) next.delete(dir);
+      else next.add(dir);
+      return next;
+    });
+  };
+
+  const handleDelete = (session: SessionMeta, dir: string) => {
+    setPendingDelete({ session, dir });
   };
 
   // 确认删除：调后端 DELETE，成功后从列表移除
@@ -87,9 +110,17 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
     setDeleting(true);
     setDeleteError(null);
     try {
-      const ok = await deleteSession(pendingDelete.id);
+      const ok = await deleteSession(pendingDelete.session.id, pendingDelete.dir);
       if (ok) {
-        setSessions((prev) => prev.filter((s) => s.id !== pendingDelete.id));
+        setGroups((prev) =>
+          prev
+            .map((g) =>
+              g.dir === pendingDelete.dir
+                ? { ...g, sessions: g.sessions.filter((s) => s.id !== pendingDelete.session.id) }
+                : g
+            )
+            .filter((g) => g.sessions.length > 0)
+        );
         setPendingDelete(null);
       } else {
         setDeleteError("删除失败，会话可能已被移除或文件被占用");
@@ -101,8 +132,6 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
       setDeleting(false);
     }
   };
-
-  const grouped = groupSessionsByDate(sessions);
 
   return (
     <div className="flex flex-col w-64 h-full bg-bg-secondary border-r border-border">
@@ -161,47 +190,73 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
 
         {tab === "sessions" && (
           <div className="px-2 pb-2">
-            {Object.keys(grouped).length === 0 && !loading && (
+            {groups.length === 0 && !loading && (
               <div className="text-center text-text-tertiary text-xs py-8">暂无会话</div>
             )}
-            {Object.entries(grouped).map(([group, items]) => (
-              <div key={group} className="mb-3">
-                <div className="text-[10px] text-text-tertiary px-2 py-1 font-medium">{group}</div>
-                {items.map((s) => (
-                  <div
-                    key={s.id}
-                    onClick={() => onSwitchSession(s.id)}
-                    className="group flex items-start gap-2 px-2 py-1.5 rounded-lg hover:bg-bg-tertiary transition-colors cursor-pointer"
+            {groups.map((g) => {
+              const expanded = expandedDirs.has(g.dir);
+              return (
+                <div key={g.dir} className="mb-1">
+                  {/* 目录头：点击折叠/展开 */}
+                  <button
+                    onClick={() => toggleDir(g.dir)}
+                    className="w-full px-2 py-1.5 rounded-lg hover:bg-bg-tertiary transition-colors"
+                    title={g.dir}
                   >
-                    <MessageSquare size={12} className="mt-0.5 text-text-tertiary flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-text-primary truncate">
-                        {s.title || "（无标题会话）"}
-                      </div>
-                      {s.summary && (
-                        <div className="text-[10px] text-text-tertiary truncate">{s.summary}</div>
+                    <div className="flex items-center gap-1.5">
+                      {expanded ? (
+                        <ChevronDown size={12} className="text-text-tertiary flex-shrink-0" />
+                      ) : (
+                        <ChevronRight size={12} className="text-text-tertiary flex-shrink-0" />
                       )}
-                      <div className="text-[10px] text-text-tertiary mt-0.5 flex items-center gap-1 min-w-0">
-                        <span className="flex-shrink-0">{s.message_count} 条 ·</span>
-                        <span className="truncate">
-                          {s.total_tokens.toLocaleString()} Token
-                        </span>
-                      </div>
+                      <Folder size={12} className="text-amber-400 flex-shrink-0" />
+                      <span className="text-xs font-medium text-text-primary truncate flex-1">
+                        {dirBasename(g.dir)}
+                      </span>
+                      <span className="text-[10px] text-text-tertiary flex-shrink-0">
+                        {g.sessions.length} 个
+                      </span>
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDelete(s.id);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 p-1 text-text-tertiary hover:text-red-400 transition-all"
-                      title="删除"
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ))}
+                    <div className="text-[10px] text-text-tertiary truncate mt-0.5 pl-[22px]">
+                      {g.dir}
+                    </div>
+                  </button>
+
+                  {/* 目录下的会话列表 */}
+                  {expanded && (
+                    <div className="ml-3 pl-2 border-l border-border">
+                      {g.sessions.map((s) => (
+                        <div
+                          key={s.id}
+                          onClick={() => onSwitchSession(s.id, g.dir)}
+                          className="group flex items-start gap-2 px-2 py-1.5 rounded-lg hover:bg-bg-tertiary transition-colors cursor-pointer"
+                        >
+                          <MessageSquare size={12} className="mt-0.5 text-text-tertiary flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs text-text-primary truncate">
+                              {s.title || "（无标题会话）"}
+                            </div>
+                            {s.summary && (
+                              <div className="text-[10px] text-text-tertiary truncate">{s.summary}</div>
+                            )}
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDelete(s, g.dir);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-1 text-text-tertiary hover:text-red-400 transition-all"
+                            title="删除"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -299,7 +354,7 @@ export const Sidebar = memo(function Sidebar({ onNewSession, onOpenSettings, onC
             <div className="px-5 py-4">
               <div className="text-sm font-medium text-text-primary mb-1">删除会话</div>
               <div className="text-xs text-text-secondary break-all">
-                确定删除「{pendingDelete.title || "无标题会话"}」？
+                确定删除「{pendingDelete.session.title || "无标题会话"}」？
                 <br />
                 <span className="text-text-tertiary">此操作不可恢复。</span>
               </div>

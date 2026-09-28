@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
@@ -40,6 +40,8 @@ class AgentToolParams(BaseModel):
 PERMISSION_MODE_MAP = {
     "default": "DEFAULT",
     "acceptEdits": "ACCEPT_EDITS",
+    "plan": "PLAN",
+    "bypassPermissions": "BYPASS",
     "dontAsk": "DONT_ASK",
 }
 
@@ -67,7 +69,10 @@ class AgentTool(Tool):
     )
     params_model = AgentToolParams
     category = "command"
-    is_concurrency_safe = False
+    # Named Explore/Verification workers have isolated conversations and can be
+    # executed in parallel when the model emits several Agent calls in one turn.
+    # Fork/team paths remain internally managed by TaskManager.
+    is_concurrency_safe = True
 
 
     def __init__(
@@ -108,15 +113,7 @@ class AgentTool(Tool):
         from codebot.agents.fork import ForkError, build_forked_messages
         from codebot.agents.parser import AgentDef
         from codebot.agents.tool_filter import resolve_agent_tools
-        from codebot.agent import Agent as AgentClass
         from codebot.conversation import ConversationManager
-        from codebot.permissions import (
-            DangerousCommandDetector,
-            PathSandbox,
-            PermissionChecker,
-            PermissionMode,
-            RuleEngine,
-        )
 
         definition: AgentDef | None = None
         conversation: ConversationManager
@@ -160,64 +157,36 @@ class AgentTool(Tool):
                 source="builtin",
             )
 
-        # 选择 LLM 客户端
         client = self._select_llm(p, definition)
 
-        # 判断是否后台运行
         is_background = p.run_in_background or definition.background
-        if self._enable_fork:
+        # ``enable_fork`` only forces anonymous conversation forks into the
+        # background. Named workers (for example three Explore agents) must
+        # return inline so the parent can receive all results and synthesize a
+        # final answer in the same turn.
+        if self._enable_fork and p.subagent_type is None:
             is_background = True
 
-        # 过滤工具（coordinator 模式可能缩减了注册表，这里用完整注册表）
         _base_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
         filtered_registry = resolve_agent_tools(
             _base_registry, definition, is_background
         )
 
-        # 为子 agent 创建权限检查器
-        pm_str = definition.permission_mode
-        pm_enum = getattr(
-            PermissionMode,
-            PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
-            PermissionMode.DEFAULT,
+        checker = self._build_permission_checker(
+            self._parent_agent.work_dir, definition.permission_mode
         )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(self._parent_agent.work_dir),
-            rule_engine=RuleEngine(),
-            mode=pm_enum,
+        sub_agent = self._build_sub_agent(
+            client, filtered_registry, self._parent_agent.work_dir, definition, checker
         )
 
-        # 创建子 agent
-        sub_agent = AgentClass(
-            client=client,
-            registry=filtered_registry,
-            protocol=self._parent_agent.protocol,
-            work_dir=self._parent_agent.work_dir,
-            max_iterations=definition.max_turns,
-            permission_checker=checker,
-            context_window=self._parent_agent.context_window,
-            instructions_content=definition.system_prompt,
-            hook_engine=self._parent_agent.hook_engine,
-        )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
-
-        # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
-        # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
+        # fork 子 agent 继承父 agent 的替换状态
         if p.subagent_type is None:
             from codebot.context import clone_replacement_state
             sub_agent.replacement_state = clone_replacement_state(
                 self._parent_agent.replacement_state
             )
 
-        # 注册追踪节点
-        trace_node = self._trace_manager.create(
-            agent_type=definition.agent_type,
-            parent_id=self._parent_agent.agent_id,
-            trace_id=sub_agent.trace_id,
-        )
-        sub_agent.agent_id = trace_node.agent_id
+        trace_node = self._register_trace(definition, sub_agent)
 
         agent_name = p.name or p.subagent_type or f"agent-{trace_node.agent_id}"
         is_fork = p.subagent_type is None
@@ -241,17 +210,51 @@ class AgentTool(Tool):
             )
 
         # 前台同步执行
+        tracking_id = self._task_manager.start_foreground(
+            agent=sub_agent,
+            task=p.prompt,
+            name=agent_name,
+        )
+
+        def on_progress(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "tool_use":
+                activity = f"正在调用 {event.get('toolName', '工具')}"
+                self._task_manager.update_progress(
+                    tracking_id, tool_call_delta=1, last_activity=activity
+                )
+            elif event_type == "usage":
+                usage = event.get("usage") or {}
+                self._task_manager.update_progress(
+                    tracking_id,
+                    input_tokens=int(usage.get("inputTokens", 0)),
+                    output_tokens=int(usage.get("outputTokens", 0)),
+                    last_activity="正在分析结果",
+                )
+            elif event_type == "stream_text":
+                self._task_manager.update_progress(
+                    tracking_id, last_activity="正在整理回答"
+                )
+
         try:
             if is_fork:
-                result_text = await sub_agent.run_to_completion("", conversation)
+                result_text = await sub_agent.run_to_completion(
+                    "", conversation, event_callback=on_progress
+                )
             else:
-                result_text = await sub_agent.run_to_completion(p.prompt)
+                result_text = await sub_agent.run_to_completion(
+                    p.prompt, event_callback=on_progress
+                )
         except Exception as e:
+            self._task_manager.fail_foreground(tracking_id, f"Error: {e}")
             self._trace_manager.complete(trace_node.agent_id, "failed")
             return ToolResult(
                 output=f"Sub-agent failed: {e}", is_error=True
             )
 
+        self._task_manager.complete_foreground(
+            tracking_id, result=result_text or "(sub-agent returned no output)"
+        )
         self._trace_manager.update(
             trace_node.agent_id,
             input_tokens=sub_agent.total_input_tokens,
@@ -270,15 +273,7 @@ class AgentTool(Tool):
         from codebot.agents.fork import ForkError, build_forked_messages
         from codebot.agents.parser import AgentDef
         from codebot.agents.tool_filter import build_teammate_tools
-        from codebot.agent import Agent as AgentClass
         from codebot.conversation import ConversationManager
-        from codebot.permissions import (
-            DangerousCommandDetector,
-            PathSandbox,
-            PermissionChecker,
-            PermissionMode,
-            RuleEngine,
-        )
         from codebot.teams.models import BackendType, TeammateInfo
         from codebot.teams.registry import AgentNameRegistry
 
@@ -377,26 +372,10 @@ class AgentTool(Tool):
         # 6. 创建子 agent 并附加队友专属指令
         instructions = (definition.system_prompt or "") + TEAMMATE_ADDENDUM
 
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
-            mode=PermissionMode.DONT_ASK,
+        checker = self._build_permission_checker(wt.path, "dontAsk")
+        sub_agent = self._build_sub_agent(
+            client, teammate_registry, wt.path, definition, checker, instructions
         )
-
-        sub_agent = AgentClass(
-            client=client,
-            registry=teammate_registry,
-            protocol=self._parent_agent.protocol,
-            work_dir=wt.path,
-            max_iterations=definition.max_turns,
-            permission_checker=checker,
-            context_window=self._parent_agent.context_window,
-            instructions_content=instructions,
-            hook_engine=self._parent_agent.hook_engine,
-        )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
         sub_agent.agent_id = agent_id
         sub_agent.team_name = p.team_name
         sub_agent._team_manager = self._team_manager
@@ -492,6 +471,71 @@ class AgentTool(Tool):
         )
 
 
+    def _build_permission_checker(
+        self, work_dir: str, mode_str: str
+    ) -> "PermissionChecker":
+        """统一构建 PermissionChecker，三个执行路径共用。"""
+        from codebot.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+        enum_name = PERMISSION_MODE_MAP.get(mode_str)
+        if enum_name is None:
+            log.warning(
+                "Unknown sub-agent permission mode %r; falling back to default",
+                mode_str,
+            )
+            enum_name = "DEFAULT"
+        pm_enum = getattr(PermissionMode, enum_name, PermissionMode.DEFAULT)
+        return PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(work_dir),
+            rule_engine=RuleEngine(),
+            mode=pm_enum,
+        )
+
+    def _build_sub_agent(
+        self,
+        client: "LLMClient",
+        registry: Any,
+        work_dir: str,
+        definition: "AgentDef",
+        checker: "PermissionChecker",
+        instructions: str = "",
+    ) -> "Agent":
+        """统一构建子 Agent 实例，三个执行路径共用。"""
+        from codebot.agent import Agent as AgentClass
+
+        sub_agent = AgentClass(
+            client=client,
+            registry=registry,
+            protocol=self._parent_agent.protocol,
+            work_dir=work_dir,
+            max_iterations=definition.max_turns,
+            permission_checker=checker,
+            context_window=self._parent_agent.context_window,
+            instructions_content=instructions or definition.system_prompt,
+            hook_engine=self._parent_agent.hook_engine,
+        )
+        sub_agent.parent_id = self._parent_agent.agent_id
+        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        return sub_agent
+
+    def _register_trace(
+        self, definition: "AgentDef", sub_agent: "Agent"
+    ) -> Any:
+        """统一注册追踪节点，三个执行路径共用。"""
+        trace_node = self._trace_manager.create(
+            agent_type=definition.agent_type,
+            parent_id=self._parent_agent.agent_id,
+            trace_id=sub_agent.trace_id,
+        )
+        sub_agent.agent_id = trace_node.agent_id
+        return trace_node
+
     def _select_llm(
         self,
         params: AgentToolParams,
@@ -520,15 +564,6 @@ class AgentTool(Tool):
 
         from codebot.agents.parser import AgentDef
         from codebot.agents.tool_filter import resolve_agent_tools
-        from codebot.agent import Agent as AgentClass
-        from codebot.conversation import ConversationManager
-        from codebot.permissions import (
-            DangerousCommandDetector,
-            PathSandbox,
-            PermissionChecker,
-            PermissionMode,
-            RuleEngine,
-        )
         from codebot.worktree.integration import (
             build_worktree_notice,
             generate_worktree_name,
@@ -574,39 +609,12 @@ class AgentTool(Tool):
             _base_registry, definition, False
         )
 
-        pm_str = definition.permission_mode
-        pm_enum = getattr(
-            PermissionMode,
-            PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
-            PermissionMode.DEFAULT,
-        )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
-            mode=pm_enum,
+        checker = self._build_permission_checker(wt.path, definition.permission_mode)
+        sub_agent = self._build_sub_agent(
+            client, filtered_registry, wt.path, definition, checker
         )
 
-        sub_agent = AgentClass(
-            client=client,
-            registry=filtered_registry,
-            protocol=self._parent_agent.protocol,
-            work_dir=wt.path,
-            max_iterations=definition.max_turns,
-            permission_checker=checker,
-            context_window=self._parent_agent.context_window,
-            instructions_content=definition.system_prompt,
-            hook_engine=self._parent_agent.hook_engine,
-        )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
-
-        trace_node = self._trace_manager.create(
-            agent_type=definition.agent_type,
-            parent_id=self._parent_agent.agent_id,
-            trace_id=sub_agent.trace_id,
-        )
-        sub_agent.agent_id = trace_node.agent_id
+        trace_node = self._register_trace(definition, sub_agent)
 
         try:
             result_text = await sub_agent.run_to_completion(task)
@@ -641,9 +649,11 @@ class AgentTool(Tool):
         from codebot.config import ProviderConfig
 
         model_map = {
-            "haiku": "claude-haiku-4-5-20251001",
-            "sonnet": "claude-sonnet-4-6-20250514",
-            "opus": "claude-opus-4-6-20250514",
+            "haiku": "deepseek-v4-flash",
+            "sonnet": "deepseek-v4-pro",
+            "opus": "deepseek-v4-pro",
+            "flash": "deepseek-v4-flash",
+            "pro": "deepseek-v4-pro",
         }
         model_id = model_map.get(model_alias, model_alias)
 
@@ -659,3 +669,4 @@ class AgentTool(Tool):
             return create_client(config)
         except Exception:
             return None
+

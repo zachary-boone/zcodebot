@@ -1,8 +1,4 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import re
@@ -50,7 +46,7 @@ class ProviderConfig:
 
     def resolve_api_key(self) -> str:
         if self.api_key:
-            return self.api_key
+            return resolve_env_vars(self.api_key)
         env_var = _ENV_KEY_MAP.get(self.protocol, "")
         return os.environ.get(env_var, "")
 
@@ -129,8 +125,17 @@ class WorktreeConfig:
 
 
 @dataclass
+class EngineConfig:
+    """引擎参数配置，覆盖 agent.py / client.py 中的硬编码常量。"""
+    max_tokens_ceiling: int = 64000
+    max_output_tokens_recoveries: int = 3
+    memory_extraction_interval: int = 5
+
+
+@dataclass
 class AppConfig:
     providers: list[ProviderConfig]
+    embedding_provider: ProviderConfig | None = None
     permission_mode: str = "default"
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
     raw_hooks: list[dict] = field(default_factory=list)
@@ -139,6 +144,9 @@ class AppConfig:
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
+    engine: EngineConfig = field(default_factory=EngineConfig)
+    # 记录 YAML 中显式出现的键名，用于合并时区分"未设置"和"显式设为 false"
+    _explicit_keys: set[str] = field(default_factory=set, repr=False)
 
 
 def _load_single_file(path: Path) -> AppConfig:
@@ -163,6 +171,22 @@ def _load_single_file(path: Path) -> AppConfig:
         for p in validated["providers"]
     ]
 
+    embedding_raw = validated["embedding_provider"]
+    embedding_provider = (
+        ProviderConfig(
+            name=embedding_raw["name"],
+            protocol=embedding_raw["protocol"],
+            base_url=embedding_raw["base_url"],
+            model=embedding_raw["model"],
+            api_key=embedding_raw["api_key"],
+            thinking=embedding_raw["thinking"],
+            context_window=embedding_raw["context_window"],
+            max_output_tokens=embedding_raw["max_output_tokens"],
+        )
+        if embedding_raw is not None
+        else None
+    )
+
     mcp_servers = [
         MCPServerConfig(
             name=s["name"],
@@ -182,8 +206,20 @@ def _load_single_file(path: Path) -> AppConfig:
         stale_cutoff_hours=wt["stale_cutoff_hours"],
     )
 
+    eng = validated["engine"]
+    engine_cfg = EngineConfig(
+        max_tokens_ceiling=eng["max_tokens_ceiling"],
+        max_output_tokens_recoveries=eng["max_output_tokens_recoveries"],
+        memory_extraction_interval=eng["memory_extraction_interval"],
+    )
+
+    # 记录原始 YAML 中显式出现的键，用于合并时区分"未设置"和"显式 false"
+    _BOOL_KEYS = {"enable_fork", "enable_verification_agent", "enable_coordinator_mode"}
+    explicit = {k for k in _BOOL_KEYS if k in raw}
+
     return AppConfig(
         providers=providers,
+        embedding_provider=embedding_provider,
         permission_mode=validated["permission_mode"],
         mcp_servers=mcp_servers,
         raw_hooks=validated["hooks"],
@@ -192,12 +228,21 @@ def _load_single_file(path: Path) -> AppConfig:
         worktree=worktree_cfg,
         teammate_mode=validated["teammate_mode"],
         enable_coordinator_mode=validated["enable_coordinator_mode"],
+        engine=engine_cfg,
+        _explicit_keys=explicit,
     )
+
+
+def _hook_key(hook: dict) -> tuple:
+    """提取 hook 的去重键：event + command 组合。"""
+    return (hook.get("event", ""), hook.get("command", ""))
 
 
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
     if override.providers:
         base.providers = override.providers
+    if override.embedding_provider is not None:
+        base.embedding_provider = override.embedding_provider
     if override.permission_mode != "default":
         base.permission_mode = override.permission_mode
 
@@ -210,15 +255,26 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
                 base.mcp_servers.append(s)
                 by_name[s.name] = len(base.mcp_servers) - 1
 
-    base.raw_hooks.extend(override.raw_hooks)
-    if override.enable_fork:
-        base.enable_fork = True
-    if override.enable_verification_agent:
-        base.enable_verification_agent = True
+    # Hook 去重：按 event+command 键去重，override 中的同名 hook 覆盖 base
+    if override.raw_hooks:
+        base_keys = {_hook_key(h): i for i, h in enumerate(base.raw_hooks)}
+        for h in override.raw_hooks:
+            key = _hook_key(h)
+            if key in base_keys:
+                base.raw_hooks[base_keys[key]] = h
+            else:
+                base.raw_hooks.append(h)
+                base_keys[key] = len(base.raw_hooks) - 1
+
+    # 布尔标志：只有 override 显式设置了该键时才覆盖（区分"未设置"和"显式 false"）
+    if "enable_fork" in override._explicit_keys:
+        base.enable_fork = override.enable_fork
+    if "enable_verification_agent" in override._explicit_keys:
+        base.enable_verification_agent = override.enable_verification_agent
+    if "enable_coordinator_mode" in override._explicit_keys:
+        base.enable_coordinator_mode = override.enable_coordinator_mode
     if override.teammate_mode:
         base.teammate_mode = override.teammate_mode
-    if override.enable_coordinator_mode:
-        base.enable_coordinator_mode = True
     return base
 
 
@@ -252,3 +308,4 @@ def load_config(path: Path | None = None) -> AppConfig:
             "in project or ~/.codebot/config.yaml"
         )
     return merged
+

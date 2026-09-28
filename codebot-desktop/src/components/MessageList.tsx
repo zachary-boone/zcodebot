@@ -9,10 +9,20 @@ export function MessageList() {
   const errorMessage = useChatStore((s) => s.errorMessage);
   const endRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // 只有用户仍停留在底部时才跟随流式输出。用户向上滚动后锁定位置，
+  // 避免每个 token 更新都把滚轮强制拉回底部造成抖动。
+  const followOutput = useRef(true);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
 
   const scrollToBottom = (smooth = true) => {
-    endRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
+    followOutput.current = true;
+    const el = containerRef.current;
+    if (el) {
+      el.scrollTo({
+        top: el.scrollHeight,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    }
   };
 
   // 流式时自动滚动到底部。
@@ -20,12 +30,16 @@ export function MessageList() {
   // 启动滚动动画，帧率低会感觉卡顿；流式结束后的首次定位用 smooth 收尾。
   const wasStreaming = useRef(false);
   useEffect(() => {
-    if (isStreaming) {
-      endRef.current?.scrollIntoView({ behavior: "auto" });
+    if (isStreaming && followOutput.current) {
+      // 直接设置容器位置，不使用 scrollIntoView，避免浏览器重新定位整个页面。
+      const el = containerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
       wasStreaming.current = true;
-    } else if (wasStreaming.current) {
+    } else if (!isStreaming && wasStreaming.current && followOutput.current) {
       wasStreaming.current = false;
-      endRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollToBottom(true);
+    } else if (!isStreaming) {
+      wasStreaming.current = false;
     }
   }, [messages, isStreaming]);
 
@@ -34,6 +48,8 @@ export function MessageList() {
     const el = containerRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distanceFromBottom <= 32;
+    followOutput.current = atBottom;
     setShowScrollBtn(distanceFromBottom > 200);
   };
 

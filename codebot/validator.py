@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 """CodeBot 的配置校验逻辑。"""
 
 from __future__ import annotations
@@ -107,6 +103,14 @@ def validate_providers(raw_providers: list) -> list[dict]:
         )
 
     return providers
+
+
+def validate_embedding_provider(raw_provider: object) -> dict | None:
+    """校验可选的独立 embedding provider，复用主 provider 的字段规则。"""
+    if raw_provider is None:
+        return None
+    providers = validate_providers([raw_provider])
+    return providers[0]
 
 
 def validate_permission_mode(mode: str) -> str:
@@ -217,19 +221,31 @@ def validate_teammate_mode(mode: object) -> str:
     return mode
 
 
+def validate_engine(raw: object) -> dict:
+    """校验 engine 配置块。所有字段可选，缺失时使用默认值。"""
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "max_tokens_ceiling": int(raw.get("max_tokens_ceiling", 64000)),
+        "max_output_tokens_recoveries": int(raw.get("max_output_tokens_recoveries", 3)),
+        "memory_extraction_interval": int(raw.get("memory_extraction_interval", 5)),
+    }
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
     返回的字典包含以下键：
         providers、permission_mode、mcp_servers、hooks、
         enable_fork、enable_verification_agent、worktree、
-        teammate_mode、enable_coordinator_mode
+        teammate_mode、enable_coordinator_mode、engine
     """
     if not isinstance(raw, dict) or "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
 
     return {
         "providers": validate_providers(raw["providers"]),
+        "embedding_provider": validate_embedding_provider(raw.get("embedding_provider")),
         "permission_mode": validate_permission_mode(raw.get("permission_mode", "default")),
         "mcp_servers": validate_mcp_servers(raw.get("mcp_servers")),
         "hooks": validate_hooks(raw.get("hooks")),
@@ -242,4 +258,5 @@ def validate_config_structure(raw: object) -> dict:
         "enable_coordinator_mode": validate_bool_field(
             raw.get("enable_coordinator_mode", False), "enable_coordinator_mode"
         ),
+        "engine": validate_engine(raw.get("engine")),
     }

@@ -1,8 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-
 """SubAgent 系统的测试（第 12 章）。"""
 
 from __future__ import annotations
@@ -171,7 +166,7 @@ class TestAgentParser:
         assert body == "body text"
 
     def test_valid_permission_modes(self, tmp_path: Path):
-        for mode in ("default", "acceptEdits", "dontAsk"):
+        for mode in ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"):
             f = tmp_path / f"{mode}.md"
             f.write_text(f"---\nname: t\ndescription: t\npermissionMode: {mode}\n---\nbody")
             agent_def = parse_agent_file(f)
@@ -207,6 +202,8 @@ class TestAgentLoader:
         loader = AgentLoader(str(tmp_path), enable_verification=True)
         agents = loader.load_all()
         assert "Verification" in agents
+        assert agents["Verification"].background is False
+        assert agents["Verification"].permission_mode == "dontAsk"
 
     def test_project_overrides_builtin(self, tmp_path: Path):
         agents_dir = tmp_path / ".codebot" / "agents"
@@ -584,6 +581,25 @@ class TestTaskManager:
         names = {t.name for t in tasks}
         assert names == {"t1", "t2"}
         await asyncio.sleep(0.1)  # 让后台任务跑完
+
+    @pytest.mark.asyncio
+    async def test_foreground_progress_lifecycle(self, mock_agent):
+        tm = TaskManager()
+        task_id = tm.start_foreground(mock_agent, "explore code", name="Explore")
+
+        running = await tm.consume_status_events()
+        assert running[0].status == "running"
+        assert running[0].agent_name == "Explore"
+
+        tm.update_progress(task_id, tool_call_delta=2, last_activity="正在读取文件")
+        updates = await tm.consume_status_events()
+        assert updates[-1].progress["tool_call_count"] == 2
+        assert updates[-1].progress["last_activity"] == "正在读取文件"
+
+        tm.complete_foreground(task_id, "架构分析结果")
+        completed = await tm.consume_status_events()
+        assert completed[-1].status == "completed"
+        assert completed[-1].result == "架构分析结果"
 
     def test_cancel_nonexistent(self):
         tm = TaskManager()

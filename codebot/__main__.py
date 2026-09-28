@@ -92,6 +92,7 @@ def main() -> None:
         teammate_mode=config.teammate_mode,
         enable_coordinator_mode=config.enable_coordinator_mode,
         driver_class=driver_class,
+        embedding_provider=config.embedding_provider,
     )
     app.run()
 

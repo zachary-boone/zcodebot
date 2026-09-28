@@ -1,4 +1,4 @@
-"""CodeBot 桌面版 FastAPI 桥接服务。
+﻿"""CodeBot 桌面版 FastAPI 桥接服务。
 
 启动：python -m codebot.server [--host 127.0.0.1] [--port 7800]
 
@@ -51,9 +51,27 @@ from codebot.agent import (
 from codebot.config import ConfigError, load_config
 from codebot.hooks import HookConfigError, HookEngine, load_hooks
 from codebot.permissions import PermissionMode
+from codebot.permissions.dangerous import DangerousCommandDetector
 from codebot.runtime import Runtime, build_runtime
+from codebot.workdir_state import last_workdir, record_workdir, visited_dirs
 
 logger = logging.getLogger("codebot.server")
+_dangerous_detector = DangerousCommandDetector()
+
+# 记忆召回注入的等待上限（秒）。召回在 run_agent 开始时并发启动，
+# 这里只决定"最多再等多久"。与终端 app.py 的 3 秒保持一致：
+# 语义检索命中时实测约 0.15 秒，退化成 LLM 选择器约 2.5 秒。
+MEMORY_RECALL_WAIT = 3.0
+
+
+def _set_runtime_mode(runtime: Runtime, mode: PermissionMode) -> None:
+    """切换模式并维护规划模式的恢复栈。"""
+    if mode == PermissionMode.PLAN:
+        runtime.agent.enter_plan_mode()
+    elif runtime.agent.plan_mode:
+        runtime.agent.exit_plan_mode(mode)
+    else:
+        runtime.agent.set_permission_mode(mode)
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +168,19 @@ class SessionConnection:
     async def send_json(self, data: dict[str, Any]) -> None:
         try:
             await self.ws.send_text(json.dumps(data, ensure_ascii=False, default=str))
-        except Exception:
-            # 连接断开等，静默
-            pass
+        except Exception as e:
+            logger.debug("send_json failed (client likely disconnected): %s", e)
 
     async def run_agent(self, user_text: str) -> None:
         """启动 agent.run() 事件循环，把事件转发给前端。"""
         if self.agent_task and not self.agent_task.done():
             await self.send_json({"type": "error", "message": "已有任务在运行，请先取消"})
             return
+
+        # 记忆召回与后续准备工作并行，最多再等 MEMORY_RECALL_WAIT 秒。
+        # 与终端 app.py 的 _prefetch_relevant_memories 行为保持一致——
+        # 此前桌面端完全没有这一步，"记忆召回"只在终端生效。
+        prefetch_task = self._start_memory_prefetch(user_text)
 
         async def _drain() -> None:
             try:
@@ -173,6 +195,7 @@ class SessionConnection:
                             "request_id": req_id,
                             "tool_name": event.tool_name,
                             "description": event.description,
+                            "is_dangerous": _dangerous_detector.detect(event.description)[0],
                         })
                     elif isinstance(event, CompactNotification):
                         if self.session and event.boundary is not None:
@@ -198,10 +221,20 @@ class SessionConnection:
                                 / f"{self.session.session_id}.meta"
                             )
                         await self.send_json(event_to_dict(event))
+                        if self.runtime.agent.plan_mode:
+                            await self._send_plan_ready()
+                        self.drain_completed_tasks()
+                    elif isinstance(event, ThinkingText):
+                        # 思考内容只作为实时工作状态展示；前端不会把它写入最终正文，
+                        # 也不会把该事件单独持久化为最终答复。
+                        await self.send_json(event_to_dict(event))
                     else:
                         await self.send_json(event_to_dict(event))
                 self.persist_history_since_cursor()
                 # run() 正常结束
+                # 在发送 done 前释放句柄，避免用户收到 plan_ready 后立即批准时
+                # 被误判为“已有任务在运行”。finally 会再次兜底清理。
+                self.agent_task = None
                 await self.send_json({"type": "done"})
             except asyncio.CancelledError:
                 await self.send_json({"type": "cancelled"})
@@ -212,7 +245,73 @@ class SessionConnection:
             finally:
                 self.agent_task = None
 
+        # 注入召回到本轮上下文，再启动引擎。
+        # 必须早于 agent.run()：Agent 在 run() 开头会重建系统提示与环境上下文，
+        # system-reminder 要跟着本轮用户消息一起进入上下文才有效。
+        await self._inject_memory_reminder(prefetch_task)
         self.agent_task = asyncio.create_task(_drain())
+
+    def _start_memory_prefetch(self, user_text: str) -> "asyncio.Task | None":
+        """启动记忆召回任务；运行时不支持或输入为空时返回 None。"""
+        builder = getattr(self.runtime, "memory_reminder", None)
+        if builder is None or not user_text or not user_text.strip():
+            return None
+        try:
+            return asyncio.create_task(builder.build(user_text))
+        except Exception as e:
+            logger.debug("记忆召回启动失败（忽略）: %s", e)
+            return None
+
+    async def _inject_memory_reminder(self, task: "asyncio.Task | None") -> None:
+        """把召回结果作为 system-reminder 注入本轮上下文。
+
+        与终端一致：最多再等 MEMORY_RECALL_WAIT 秒，超时或失败都静默放弃。
+        记忆召回是增强能力，绝不能拖慢或阻断主对话。
+        """
+        if task is None:
+            return
+        try:
+            reminder = await asyncio.wait_for(task, timeout=MEMORY_RECALL_WAIT)
+            if reminder:
+                self.runtime.conversation.add_system_reminder(reminder)
+                logger.debug("已注入相关记忆（%d 字符）", len(reminder))
+        except Exception as e:
+            logger.debug("记忆召回注入失败（忽略）: %s", e)
+            task.cancel()
+
+    async def _send_plan_ready(self) -> None:
+        """通知桌面端计划已经生成，等待用户决定如何继续。"""
+        plan_path = self.runtime.agent._get_plan_path()
+        plan_content = ""
+        try:
+            if plan_path.is_file():
+                plan_content = plan_path.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("读取计划文件失败: %s", e)
+        await self.send_json({
+            "type": "plan_ready",
+            "plan_path": str(plan_path),
+            "plan_content": plan_content,
+            "has_plan": bool(plan_content.strip()),
+        })
+
+    def drain_completed_tasks(self) -> None:
+        """将后台子 Agent 的完成结果注入主 Agent 对话历史。"""
+        try:
+            completed = self.runtime.task_manager.poll_completed()
+        except Exception as e:
+            logger.debug("poll_completed failed: %s", e)
+            return
+        if not completed:
+            return
+        from codebot.agents.notification import inject_task_notifications
+        inject_task_notifications(self.runtime.conversation, completed)
+        for task in completed:
+            logger.info(
+                "background task %s (%s) completed, result injected",
+                task.id,
+                task.name,
+            )
 
     def cancel_agent(self) -> None:
         if self.agent_task and not self.agent_task.done():
@@ -405,7 +504,7 @@ async def browse_directory(path: str = "") -> dict:
 
 @app.get("/api/config")
 async def get_config() -> dict:
-    """读取当前 config 关键字段（脱敏 api_key）。"""
+    """读取桌面端设置页所需的当前配置。"""
     try:
         config = load_config()
     except ConfigError as e:
@@ -418,7 +517,9 @@ async def get_config() -> dict:
             "base_url": p.base_url,
             "model": p.model,
             "thinking": getattr(p, "thinking", False),
-            "api_key": "***" if getattr(p, "api_key", "") else "",
+            # 此服务只由 Electron 通过 127.0.0.1 访问。设置页的“小眼睛”
+            # 需要拿到原始值才能切换显示；脱敏值会使切换后始终显示 "***"。
+            "api_key": p.resolve_api_key(),
         })
     return {
         "providers": providers,
@@ -437,8 +538,9 @@ async def switch_mode(mode: str) -> dict:
         new_mode = PermissionMode(mode)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"未知权限模式: {mode}")
-    # 全局 runtime（如果有）更新 mode
-    global_runtime.permission_checker.mode = new_mode
+    if global_runtime is None:
+        raise HTTPException(status_code=503, detail="服务尚未初始化，无活跃连接")
+    _set_runtime_mode(global_runtime, new_mode)
     return {"mode": new_mode.value}
 
 
@@ -448,44 +550,68 @@ async def switch_mode(mode: str) -> dict:
 
 @app.get("/api/sessions")
 async def list_sessions() -> dict:
-    """列出所有会话（按 last_active 降序）。"""
+    """列出所有访问过的工作目录下的会话，按目录分组（每组内按 last_active 降序）。
+
+    目录来源：用户级 state.json 的 visited 列表 + 当前目录（可能尚未记录）。
+    返回 groups: [{dir, sessions: [...]}]，目录间按各自最新会话的 last_active
+    降序排列，方便前端"按目录找历史工作内容"。
+    """
     if not global_runtime:
         raise HTTPException(status_code=503, detail="引擎未就绪")
     from codebot.memory.session import SessionManager
-    sm = SessionManager(os.getcwd())
-    sessions = sm.list()
-    # 按 last_active 降序
-    sessions.sort(key=lambda s: s.last_active, reverse=True)
-    return {
-        "sessions": [
-            {
-                "id": s.id,
-                "title": s.title,
-                "summary": s.summary,
-                "message_count": s.message_count,
-                "total_tokens": s.total_tokens,
-                "created_at": s.created_at.isoformat(),
-                "last_active": s.last_active.isoformat(),
-            }
-            for s in sessions
-        ]
-    }
+    groups: list[dict[str, Any]] = []
+    seen_dirs: set[str] = set()
+    for d in visited_dirs(include=os.getcwd()):
+        path = Path(d)
+        if not path.is_dir():
+            continue
+        # Windows 盘符大小写不敏感：统一 casefold 比较避免同一目录算两个
+        key = str(path.resolve()).casefold()
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        try:
+            sessions = SessionManager(d).list()
+        except OSError:
+            continue
+        if not sessions:
+            continue
+        groups.append({
+            "dir": d,
+            "sessions": [
+                {
+                    "id": s.id,
+                    "title": s.title,
+                    "summary": s.summary,
+                    "message_count": s.message_count,
+                    "total_tokens": s.total_tokens,
+                    "created_at": s.created_at.isoformat(),
+                    "last_active": s.last_active.isoformat(),
+                }
+                for s in sessions
+            ],
+        })
+    groups.sort(key=lambda g: g["sessions"][0]["last_active"], reverse=True)
+    return {"groups": groups}
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str) -> dict:
-    """删除会话。
+async def delete_session(session_id: str, dir: str = "") -> dict:
+    """删除会话（支持跨目录：dir 指定会话所属目录，缺省为当前目录）。
 
     如果删除的是当前活动会话，先关闭它的文件句柄再删——Windows 上被
     打开的文件无法 unlink（否则 PermissionError 导致删除失败），同时让
     前端重置为干净会话。
     """
     global global_conn
-    if (
+    target_dir = dir or os.getcwd()
+    same_as_active = (
         global_conn is not None
         and global_conn.session is not None
         and global_conn.session.session_id == session_id
-    ):
+        and Path(target_dir).resolve() == Path(os.getcwd()).resolve()
+    )
+    if same_as_active:
         try:
             global_conn.session.close()
         except Exception:
@@ -502,7 +628,7 @@ async def delete_session(session_id: str) -> dict:
         await global_conn.send_json({"type": "new_session_ready"})
 
     from codebot.memory.session import SessionManager
-    sm = SessionManager(os.getcwd())
+    sm = SessionManager(target_dir)
     try:
         ok = sm.delete(session_id)
     except OSError as e:
@@ -522,6 +648,15 @@ async def get_session_messages(session_id: str) -> dict:
     try:
         messages = []
         for m in result.messages:
+            # system-reminder 是发给模型的内部上下文，不是用户消息。
+            # 旧会话中它们以 user record 形式落盘，切换会话时必须过滤，
+            # 否则 Plan 提示、环境信息等英文会被误显示在聊天窗口。
+            if m.role == "user" and m.content.lstrip().startswith("<system-reminder>"):
+                continue
+            # 工具结果消息在内部是 user role + 空正文；工具结果已由前一条
+            # assistant 的 tool_uses 表示，不能再生成一个空白聊天气泡。
+            if m.role == "user" and not m.content.strip() and not m.tool_uses:
+                continue
             msg = {
                 "role": m.role,
                 "content": m.content,
@@ -530,7 +665,11 @@ async def get_session_messages(session_id: str) -> dict:
                 msg["thinking"] = "\n".join(tb.thinking for tb in m.thinking_blocks)
             if m.tool_uses:
                 msg["tool_uses"] = [
-                    {"tool_name": tu.tool_name, "tool_id": tu.tool_id, "arguments": tu.arguments}
+                    {
+                        "tool_name": tu.tool_name,
+                        "tool_id": tu.tool_use_id,
+                        "arguments": tu.arguments,
+                    }
                     for tu in m.tool_uses
                 ]
             messages.append(msg)
@@ -642,12 +781,13 @@ async def ws_chat(websocket: WebSocket) -> None:
     前端 → 后端消息类型：
       {type: "send_message", text: "..."}
       {type: "permission_response", request_id: "...", decision: "allow|deny|allow_always"}
+      {type: "plan_decision", decision: "yolo|manual|feedback", feedback?: "..."}
       {type: "cancel"}
       {type: "switch_mode", mode: "..."}
       {type: "switch_session", session_id: "..."}
       {type: "new_session"}
       {type: "set_workdir", path: "..."}   # 切换工作目录，重建 runtime
-    后端 → 前端：见 event_to_dict + permission_request + done/cancelled/error
+    后端 → 前端：见 event_to_dict + permission_request + plan_ready + done/cancelled/error
                             + workdir_changed + engine_ready（带 work_dir）
     """
     await websocket.accept()
@@ -697,8 +837,34 @@ async def ws_chat(websocket: WebSocket) -> None:
     conn.session_manager = SessionManager(runtime.work_dir or os.getcwd())
 
     # 记录为全局活动连接，供 REST 接口（delete_session 等）操作
+    # 清理旧连接（如有），避免资源泄漏
     global global_conn
+    if global_conn is not None and global_conn.agent_task and not global_conn.agent_task.done():
+        logger.info("New WebSocket replacing active connection, cancelling old agent task")
+        global_conn.agent_task.cancel()
     global_conn = conn
+    # Start background task for sub-agent status updates
+    async def status_sender():
+        try:
+            while True:
+                events = await runtime.task_manager.consume_status_events()
+                for event in events:
+                    await conn.send_json({
+                        "type": "subagent_status",
+                        "task_id": event.task_id,
+                        "agent_name": event.agent_name,
+                        "status": event.status,
+                        "task_description": event.task_description,
+                        "result": event.result,
+                        "progress": event.progress,
+                    })
+                await asyncio.sleep(0.1)  # Small delay to avoid busy loop
+        except asyncio.CancelledError:
+            pass  # Task cancelled, exit gracefully
+        except Exception as e:
+            logger.error(f"status_sender error: {e}")
+            await asyncio.sleep(1)  # Back off on error
+    status_task = asyncio.create_task(status_sender())
 
     try:
         while True:
@@ -717,6 +883,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
+                # 后台任务可能在上一轮结束后才完成，发送下一条消息前再排空一次，
+                # 确保结果进入本轮上下文。
+                conn.drain_completed_tasks()
                 if conn.session is None and conn.session_manager is not None:
                     conn.session = conn.session_manager.create()
                     runtime.agent.session_id = conn.session.session_id
@@ -732,13 +901,51 @@ async def ws_chat(websocket: WebSocket) -> None:
                 ok = conn.resolve_permission(req_id, decision)
                 if not ok:
                     await conn.send_json({"type": "error", "message": f"未找到权限请求 {req_id}"})
+            elif mtype == "plan_decision":
+                decision = msg.get("decision", "")
+                feedback = (msg.get("feedback") or "").strip()
+                plan_path = runtime.agent._get_plan_path()
+                try:
+                    plan_content = plan_path.read_text(encoding="utf-8") if plan_path.is_file() else ""
+                except OSError as e:
+                    logger.warning("读取计划文件失败: %s", e)
+                    plan_content = ""
+                if decision == "feedback":
+                    if not feedback:
+                        await conn.send_json({"type": "error", "message": "反馈内容不能为空"})
+                        continue
+                    # 保持规划模式，继续让 Agent 修改当前计划。
+                    runtime.agent.enter_plan_mode()
+                    runtime.conversation.add_user_message(feedback)
+                    conn.history_cursor = len(runtime.conversation.history)
+                    await conn.run_agent(feedback)
+                elif decision in ("yolo", "manual"):
+                    if not plan_content.strip():
+                        await conn.send_json({
+                            "type": "error",
+                            "message": "计划文件不存在或为空，无法执行。请先让 Agent 写出计划，或选择反馈。",
+                        })
+                        continue
+                    target = (
+                        PermissionMode.BYPASS
+                        if decision == "yolo"
+                        else runtime.agent.pre_plan_mode or PermissionMode.DEFAULT
+                    )
+                    runtime.agent.exit_plan_mode(target)
+                    await conn.send_json({"type": "mode_changed", "mode": target.value})
+                    text = f"Execute this plan:\n\n{plan_content}"
+                    runtime.conversation.add_user_message(text)
+                    conn.history_cursor = len(runtime.conversation.history)
+                    await conn.run_agent(text)
+                else:
+                    await conn.send_json({"type": "error", "message": f"未知计划决定: {decision}"})
             elif mtype == "cancel":
                 conn.cancel_agent()
             elif mtype == "switch_mode":
                 mode_str = msg.get("mode", "")
                 try:
                     new_mode = PermissionMode(mode_str)
-                    runtime.permission_checker.mode = new_mode
+                    _set_runtime_mode(runtime, new_mode)
                     await conn.send_json({"type": "mode_changed", "mode": new_mode.value})
                 except ValueError:
                     await conn.send_json({"type": "error", "message": f"未知权限模式: {mode_str}"})
@@ -749,7 +956,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                 sm = SessionManager(os.getcwd())
                 result = sm.resume(session_id)
                 if result is None:
-                    await conn.send_json({"type": "error", "message": f"会话不存在: {session_id}"})
+                    await conn.send_json({
+                        "type": "error",
+                        "message": f"会话不存在或不在当前工作目录: {session_id}",
+                    })
                 else:
                     if conn.session:
                         conn.session.close()
@@ -797,6 +1007,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                 except OSError as e:
                     await conn.send_json({"type": "error", "message": f"切换目录失败: {e}"})
                     continue
+                # 记住该目录：下次启动恢复到此处，侧栏按目录展示历史会话也依赖此记录
+                record_workdir(str(target))
                 # 4) 重建 runtime：agent / sandbox / instructions / worktree / agent_loader 都绑定 work_dir
                 #    用旧 runtime 当前的权限模式（用户可能已通过 switch_mode 切换过），避免重建后回退到配置默认值
                 current_mode = runtime.permission_checker.mode
@@ -834,6 +1046,8 @@ async def ws_chat(websocket: WebSocket) -> None:
     except Exception as e:
         logger.exception("ws handler error")
     finally:
+        # Cancel status sender task
+        status_task.cancel()
         # 清理全局连接引用（如果还是本连接）。
         # 注意：不要在此处重复写 `global global_conn`——CPython 编译器对
         # finally 嵌套块里的 global 声明有处理怪癖，会报 SyntaxError；
@@ -849,7 +1063,35 @@ async def ws_chat(websocket: WebSocket) -> None:
 # CLI 入口
 # ---------------------------------------------------------------------------
 
+def _restore_last_workdir() -> None:
+    """启动时恢复到上次关闭前的工作目录。
+
+    sidecar 由 Electron 以项目根为 cwd 启动；这里读取用户级状态文件
+    ~/.codebot/state.json 的 last_workdir 并 chdir。若目标目录不可用
+    （已删除）或其中没有可用的 config（~/.codebot/config.yaml 与目标目录
+    都没有时 load_config 会抛错），回退到原始 cwd 启动。
+    """
+    last = last_workdir()
+    if not last:
+        return
+    original = os.getcwd()
+    try:
+        os.chdir(last)
+        load_config()  # 探测目标目录是否有可用配置（home config 也可兜底）
+        print(f"[server] restored workdir: {last}", file=sys.stderr)
+    except ConfigError as e:
+        print(
+            f"[server] workdir {last} 无可用的 config，回退到 {original}（{e}）",
+            file=sys.stderr,
+        )
+        try:
+            os.chdir(original)
+        except OSError:
+            pass
+
+
 def main() -> None:
+    _restore_last_workdir()
     Path(".codebot").mkdir(parents=True, exist_ok=True)
     # 尝试写文件日志，失败则降级到纯 stderr（避免被 IDE 锁住 debug.log 启动失败）
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
@@ -862,8 +1104,6 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=handlers,
     )
-    # 同时输出到 stderr 方便 sidecar 调试
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
 
     parser = argparse.ArgumentParser(prog="codebot.server", description="CodeBot desktop bridge")
     parser.add_argument("--host", default="127.0.0.1")
@@ -877,3 +1117,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

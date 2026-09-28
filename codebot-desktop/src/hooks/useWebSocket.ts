@@ -1,4 +1,4 @@
-// WebSocket 连接 + 事件分发 hook
+﻿// WebSocket 连接 + 事件分发 hook
 import { useEffect, useRef, useCallback } from "react";
 import { useChatStore } from "../store/chatStore";
 import type { ClientMessage, ServerMessage, ToolCall } from "../types";
@@ -75,8 +75,10 @@ export function useWebSocket() {
           }
           break;
         case "thinking":
+          // 过程内容只进入当前消息的工作区，最终正文仍只来自 stream_text。
           if (currentAssistantId.current) {
             store.appendThinking(currentAssistantId.current, msg.text);
+            store.setActivity(currentAssistantId.current, "正在分析任务…");
           }
           break;
         case "tool_use": {
@@ -88,6 +90,7 @@ export function useWebSocket() {
               status: "running",
             };
             store.addToolUse(currentAssistantId.current, tool);
+            store.setActivity(currentAssistantId.current, `正在执行 ${msg.tool_name}…`);
           }
           break;
         }
@@ -100,6 +103,10 @@ export function useWebSocket() {
               truncated: msg.truncated,
               status: msg.is_error ? "error" : "complete",
             });
+            store.setActivity(
+              currentAssistantId.current,
+              msg.is_error ? `${msg.tool_name} 执行失败` : `${msg.tool_name} 已完成，继续处理…`
+            );
           }
           break;
         case "usage":
@@ -122,12 +129,21 @@ export function useWebSocket() {
             request_id: msg.request_id,
             tool_name: msg.tool_name,
             description: msg.description,
+            is_dangerous: msg.is_dangerous,
+          });
+          break;
+        case "plan_ready":
+          store.setPendingPlan({
+            plan_path: msg.plan_path,
+            plan_content: msg.plan_content,
+            has_plan: msg.has_plan,
           });
           break;
         case "done":
           // 结束前 flush 流式缓冲，确保最后一段内容不丢失
           flushStreamText();
           if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "工作完成");
             store.completeMessage(currentAssistantId.current, "complete");
             currentAssistantId.current = null;
           }
@@ -137,6 +153,7 @@ export function useWebSocket() {
         case "cancelled":
           flushStreamText();
           if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "已取消");
             store.completeMessage(currentAssistantId.current, "complete");
             currentAssistantId.current = null;
           }
@@ -148,12 +165,16 @@ export function useWebSocket() {
           break;
         case "session_switched":
           // 会话已在后端切换，前端清空当前消息（历史由 REST 加载）
+          store.setPendingPlan(null);
+          store.setPendingPermission(null);
           store.resetSessionUsage();
           break;
         case "new_session_ready":
           // 正常新会话时前端已 reset；删除当前活动会话时后端也会发此事件，
           // 这里统一清空消息/统计，保证界面回到干净状态。
           store.setError(null);
+          store.setPendingPlan(null);
+          store.setPendingPermission(null);
           store.resetSessionUsage();
           useChatStore.setState({ messages: [] });
           break;
@@ -163,6 +184,7 @@ export function useWebSocket() {
           // 并刷新 store 的 workDir，让侧栏 / 文件树 / 状态栏立即反映新目录。
           store.setWorkDir(msg.work_dir);
           store.setPendingPermission(null);
+          store.setPendingPlan(null);
           store.setStreaming(false);
           store.resetSessionUsage();
           useChatStore.setState({ messages: [] });
@@ -172,6 +194,7 @@ export function useWebSocket() {
         case "error":
           flushStreamText();
           if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "执行失败");
             store.completeMessage(currentAssistantId.current, "error");
             currentAssistantId.current = null;
           }
@@ -182,11 +205,31 @@ export function useWebSocket() {
           // 简单提示，暂不做倒计时 UI
           break;
         case "turn_complete":
+          if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "正在整理当前步骤…");
+          }
+          break;
         case "loop_complete":
+          if (currentAssistantId.current) {
+            store.setActivity(currentAssistantId.current, "正在整理最终结果…");
+          }
+          break;
         case "compact":
         case "hook":
           // MVP 阶段先忽略这些次要事件
           break;
+        case "subagent_status": {
+          const saMsg = msg as Extract<typeof msg, { type: "subagent_status" }>;
+          store.updateSubAgentStatus({
+            task_id: saMsg.task_id,
+            agent_name: saMsg.agent_name,
+            status: saMsg.status,
+            task_description: saMsg.task_description,
+            result: saMsg.result,
+            progress: saMsg.progress,
+          });
+          break;
+        }
       }
     },
     [store, notifySessionsChanged, flushStreamText, scheduleFlush]
@@ -261,6 +304,17 @@ export function useWebSocket() {
     [send, store]
   );
 
+  const decidePlan = useCallback(
+    (decision: "yolo" | "manual" | "feedback", feedback = "") => {
+      store.setPendingPlan(null);
+      store.addUserMessage(feedback || "执行计划");
+      store.setStreaming(true);
+      currentAssistantId.current = store.startAssistantMessage();
+      send({ type: "plan_decision", decision, feedback });
+    },
+    [send, store]
+  );
+
   const switchMode = useCallback(
     (mode: string) => {
       send({ type: "switch_mode", mode });
@@ -303,5 +357,5 @@ export function useWebSocket() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { sendMessage, cancel, respondPermission, switchMode, switchSession, newSession, setWorkDir, ws: wsRef };
+  return { sendMessage, cancel, respondPermission, decidePlan, switchMode, switchSession, newSession, setWorkDir, ws: wsRef };
 }

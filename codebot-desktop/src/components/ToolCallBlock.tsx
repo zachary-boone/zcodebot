@@ -61,7 +61,7 @@ function ToolCallBlockBase({ tool }: Props) {
   const newContent = (tool.arguments.content as string) || (tool.arguments.new_string as string) || "";
 
   return (
-    <div className="border border-border rounded-lg bg-bg-tertiary overflow-hidden my-1.5">
+    <div className="border border-border rounded-lg bg-bg-tertiary overflow-hidden my-0.5">
       <button
         onClick={() => setExpanded((v) => !v)}
         className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-bg-secondary transition-colors"

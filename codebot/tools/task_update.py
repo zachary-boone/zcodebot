@@ -1,8 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -35,7 +30,8 @@ class TaskUpdateTool(Tool):
     )
     params_model = TaskUpdateParams
     category = "command"
-    is_concurrency_safe = True
+    # 修改共享任务表，不能进入不经过权限检查的并发批。
+    is_concurrency_safe = False
 
 
     def __init__(self, team_manager: TeamManager, team_name: str) -> None:

@@ -6,7 +6,7 @@
   - 两路召回 + RRF 融合，取长补短
 
 用纯 Python 实现的轻量 BM25（rank-bm25 风格），不引入 Elasticsearch 重依赖。
-只存内存——代码块通常几千到几万个，内存 BM25 完全够用。
+索引在内存中维护倒排表，查询只对命中查询词的文档打分。
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ class BM25Document:
     """BM25 文档。"""
 
     doc_id: str           # 和 CodeChunk.id 一致
-    tokens: list[str]
     token_freqs: dict[str, int] = field(default_factory=dict)
     length: int = 0
 
@@ -58,7 +57,11 @@ class BM25Index:
         self._k1 = k1
         self._b = b
         self._docs: dict[str, BM25Document] = {}
-        self._doc_freqs: dict[str, int] = {}  # token -> 出现该 token 的文档数
+        # token -> 包含该 token 的文档 ID。查询时通过它得到候选集，
+        # 避免每次遍历整个语料库。
+        self._postings: dict[str, set[str]] = {}
+        self._doc_order: dict[str, int] = {}
+        self._next_order = 0
         self._avg_length: float = 0.0
         self._corpus_size: int = 0
 
@@ -70,22 +73,44 @@ class BM25Index:
             for t in tokens:
                 freqs[t] = freqs.get(t, 0) + 1
 
-            # 如果是覆盖旧文档，先回退 doc_freqs
-            if doc_id in self._docs:
-                old = self._docs[doc_id]
-                for tok in old.token_freqs:
-                    self._doc_freqs[tok] = max(0, self._doc_freqs.get(tok, 0) - 1)
+            # 如果是覆盖旧文档，先从倒排表移除旧版本。
+            self._remove_doc(doc_id)
 
             self._docs[doc_id] = BM25Document(
-                doc_id=doc_id, tokens=tokens,
+                doc_id=doc_id,
                 token_freqs=freqs, length=len(tokens),
             )
             for tok in freqs:
-                self._doc_freqs[tok] = self._doc_freqs.get(tok, 0) + 1
+                self._postings.setdefault(tok, set()).add(doc_id)
+            self._doc_order[doc_id] = self._next_order
+            self._next_order += 1
 
         self._corpus_size = len(self._docs)
         total_length = sum(d.length for d in self._docs.values())
         self._avg_length = total_length / self._corpus_size if self._corpus_size else 0.0
+
+    def delete_docs(self, doc_ids: list[str] | set[str]) -> None:
+        """删除文档及其倒排项；不存在的 ID 会被忽略。"""
+        for doc_id in doc_ids:
+            self._remove_doc(doc_id)
+
+        self._corpus_size = len(self._docs)
+        total_length = sum(d.length for d in self._docs.values())
+        self._avg_length = total_length / self._corpus_size if self._corpus_size else 0.0
+
+    def _remove_doc(self, doc_id: str) -> None:
+        """移除单个文档；调用方负责在批量操作后更新统计量。"""
+        doc = self._docs.pop(doc_id, None)
+        if doc is None:
+            return
+        for token in doc.token_freqs:
+            posting = self._postings.get(token)
+            if posting is None:
+                continue
+            posting.discard(doc_id)
+            if not posting:
+                del self._postings[token]
+        self._doc_order.pop(doc_id, None)
 
     def search(self, query: str, top_k: int = 20) -> list[tuple[str, float]]:
         """检索：返回 [(doc_id, score)] 按分数降序，最多 top_k 个。"""
@@ -96,13 +121,20 @@ class BM25Index:
         if not query_tokens:
             return []
 
+        # set 去重后只保留至少命中一个查询词的文档。
+        candidate_ids: set[str] = set()
+        for token in set(query_tokens):
+            candidate_ids.update(self._postings.get(token, ()))
+
         scored: list[tuple[str, float]] = []
-        for doc_id, doc in self._docs.items():
+        for doc_id in candidate_ids:
+            doc = self._docs[doc_id]
             score = self._score(doc, query_tokens)
             if score > 0:
                 scored.append((doc_id, score))
 
-        scored.sort(key=lambda x: x[1], reverse=True)
+        # 用插入顺序打破同分，避免 set 遍历造成结果抖动。
+        scored.sort(key=lambda x: (-x[1], self._doc_order[x[0]]))
         return scored[:top_k]
 
     def _score(self, doc: BM25Document, query_tokens: list[str]) -> float:
@@ -121,7 +153,7 @@ class BM25Index:
             if t not in doc.token_freqs:
                 continue
             f = doc.token_freqs[t]
-            df = self._doc_freqs.get(t, 0)
+            df = len(self._postings.get(t, ()))
             # BM25 IDF（+1 平滑保证非负）
             idf = math.log((self._corpus_size - df + 0.5) / (df + 0.5) + 1)
             # BM25 TF

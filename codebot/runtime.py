@@ -1,4 +1,4 @@
-"""CodeBot 引擎运行时 —— 把 CLI 与桌面版共用的引擎初始化逻辑抽到一处。
+﻿"""CodeBot 引擎运行时 —— 把 CLI 与桌面版共用的引擎初始化逻辑抽到一处。
 
 CLI（__main__.py）和 FastAPI 桥接服务（server.py）都调 build_runtime()，
 保证两边构造的 Agent / Registry / PermissionChecker / TeamManager 完全一致。
@@ -38,6 +38,10 @@ class Runtime:
     trace_manager: Any
     hook_engine: HookEngine | None
     config: AppConfig
+    # 记忆相关：memory_manager 驱动长期记忆的读写（Agent 用它 load/extract），
+    # memory_reminder 负责每轮按 query 召回相关记忆。
+    # 桌面端曾经两者都缺——既不注入也不写回 memories.md，这里补齐。
+    memory_reminder: Any = None
     # 当前工作目录。CLI 用 os.getcwd()；桌面版可在运行时通过 server.set_workdir 切换。
     # 重建 runtime 时此字段会被刷新，REST 接口与 WS 都依赖它定位文件 / 会话 / memory。
     work_dir: str = ""
@@ -96,6 +100,61 @@ async def build_runtime(
     registry = create_default_registry()
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
+    # 记忆系统：桌面端此前完全没有接——
+    #   memory_manager  → Agent 用它注入长期记忆（load）并周期化提取写回（extract）
+    #   memory_reminder → 每轮按 query 召回相关记忆（终端 app.py 早就有，桌面端缺）
+    from codebot.memory import MemoryManager
+    from codebot.memory.reminder import MemoryReminder
+
+    memory_manager = MemoryManager(work_dir)
+    memory_reminder = MemoryReminder(
+        work_dir=work_dir,
+        chat_provider=provider,
+        # 显式传配置里的 embedding provider：embedding 模型常与聊天模型不同厂商
+        embedding_provider=config.embedding_provider,
+        memory_manager=memory_manager,
+    )
+
+    # RAG 第二期：初始化语义代码搜索（桌面端也需要）
+    # 复用 app.py 的初始化逻辑，支持查询重写优化
+    try:
+        from codebot.rag import create_embedding_provider
+        from codebot.rag.qdrant_store import create_code_store
+        from codebot.rag.indexer import IncrementalIndexer
+        from codebot.rag.query_rewriter import QueryRewriter
+        from codebot.tools.code_search import CodeSearch
+
+        # Use embedding_provider if configured, otherwise fall back to main provider
+        embedding_cfg = getattr(config, 'embedding_provider', None)
+        embedding_provider = embedding_cfg if embedding_cfg else provider
+        embedder = create_embedding_provider(embedding_provider)
+        if embedder.is_available():
+            store = create_code_store(embedder, project_root=work_dir)
+            if store.is_available():
+                indexer = IncrementalIndexer(work_dir, store)
+                
+                # 初始化查询重写器（优化中文查询匹配英文代码）
+                query_rewriter = QueryRewriter(
+                    llm_client=client,  # 注入LLM客户端
+                    cache_ttl=3600,
+                    enable_local_mapping=True,
+                    enable_llm_rewrite=True,
+                )
+                
+                # 用带 indexer/embedder/query_rewriter 的 CodeSearch 覆盖默认降级版
+                code_search = CodeSearch(
+                    indexer=indexer,
+                    embedder=embedder,
+                    query_rewriter=query_rewriter,
+                )
+                registry.register(code_search)
+                
+                # 启动后台预热
+                indexer.start_background_warmup()
+    except Exception:
+        # RAG 是增强，任何失败都不影响主流程
+        pass
+
     agent = Agent(
         client=client,
         registry=registry,
@@ -105,7 +164,13 @@ async def build_runtime(
         context_window=provider.get_context_window(),
         instructions_content=instructions,
         hook_engine=hook_engine,
+        memory_manager=memory_manager,
     )
+    # 从配置覆盖引擎参数
+    eng = config.engine
+    agent.max_tokens_ceiling = eng.max_tokens_ceiling
+    agent.max_output_tokens_recoveries = eng.max_output_tokens_recoveries
+    agent.memory_extraction_interval = eng.memory_extraction_interval
 
     wt_cfg = config.worktree or WorktreeConfig()
     wt_manager = WorktreeManager(
@@ -137,6 +202,11 @@ async def build_runtime(
         enable_coordinator_mode=config.enable_coordinator_mode,
     ))
     registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
+    from codebot.tools.exit_plan_mode import ExitPlanModeTool
+    registry.register(ExitPlanModeTool(
+        is_plan_mode=lambda: agent.plan_mode,
+        plan_exists=lambda: agent._get_plan_path().exists(),
+    ))
 
     # 团队/子 agent 完成通知的排空回调（与 CLI 保持一致）
     def drain_mailbox_only() -> list[str]:
@@ -161,4 +231,6 @@ async def build_runtime(
         hook_engine=hook_engine,
         config=config,
         work_dir=work_dir,
+        memory_reminder=memory_reminder,
     )
+

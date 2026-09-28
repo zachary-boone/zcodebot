@@ -1,6 +1,21 @@
-// 后端 WebSocket 消息类型定义（与 codebot/server.py 对应）
+﻿// 后端 WebSocket 消息类型定义（与 codebot/server.py 对应）
 
 // 后端 → 前端
+
+export interface SubAgentStatus {
+  task_id: string;
+  agent_name: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  task_description: string;
+  result: string;
+  progress: {
+    tool_call_count: number;
+    input_tokens: number;
+    output_tokens: number;
+    last_activity: string;
+  };
+}
+
 export type ServerMessage =
   | { type: "engine_initializing" }
   | {
@@ -30,6 +45,7 @@ export type ServerMessage =
     }
   | { type: "turn_complete"; turn: number }
   | { type: "loop_complete"; total_turns: number }
+  | { type: "plan_ready"; plan_path: string; plan_content: string; has_plan: boolean }
   | { type: "usage"; input_tokens: number; output_tokens: number }
   | { type: "error"; message: string }
   | { type: "compact"; before_tokens: number; message: string }
@@ -38,6 +54,7 @@ export type ServerMessage =
       request_id: string;
       tool_name: string;
       description: string;
+      is_dangerous: boolean;
     }
   | { type: "done" }
   | { type: "cancelled" }
@@ -51,6 +68,20 @@ export type ServerMessage =
       event: string;
       output: string;
       success: boolean;
+    }
+  | {
+      type: "subagent_status";
+      task_id: string;
+      agent_name: string;
+      status: "running" | "completed" | "failed" | "cancelled";
+      task_description: string;
+      result: string;
+      progress: {
+        tool_call_count: number;
+        input_tokens: number;
+        output_tokens: number;
+        last_activity: string;
+      };
     };
 
 // 前端 → 后端
@@ -61,7 +92,14 @@ export type ClientMessage =
   | { type: "switch_mode"; mode: string }
   | { type: "switch_session"; session_id: string }
   | { type: "new_session" }
-  | { type: "set_workdir"; path: string };
+  | { type: "set_workdir"; path: string }
+  | { type: "plan_decision"; decision: "yolo" | "manual" | "feedback"; feedback?: string };
+
+export interface PendingPlan {
+  plan_path: string;
+  plan_content: string;
+  has_plan: boolean;
+}
 
 // 前端 store 里一条消息（由多个事件聚合而成）
 export interface ChatMessage {
@@ -71,6 +109,8 @@ export interface ChatMessage {
   content: string;
   // 思考过程文本
   thinking: string;
+  // 当前轮次的工作阶段，仅用于过程展示，不参与最终答复。
+  activity?: string;
   // 关联的工具调用
   toolCalls: ToolCall[];
   // 状态
@@ -94,6 +134,7 @@ export interface PermissionRequest {
   request_id: string;
   tool_name: string;
   description: string;
+  is_dangerous: boolean;
 }
 
 // Electron preload 注入到 window.codebot 的原生能力。
@@ -113,3 +154,4 @@ declare global {
     codebot?: CodebotBridge;
   }
 }
+

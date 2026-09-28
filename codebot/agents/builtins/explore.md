@@ -8,7 +8,7 @@ disallowedTools:
   - NotebookEdit
   - EnterPlanMode
   - ExitPlanMode
-model: haiku
+model: deepseek-v4-flash
 maxTurns: 30
 ---
 
@@ -24,3 +24,4 @@ maxTurns: 30
 - 尽可能并行发起多个工具调用以提高效率
 
 高效完成搜索请求，清晰报告发现。
+

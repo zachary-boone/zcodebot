@@ -1,10 +1,11 @@
-// 消息状态管理（Zustand）
+﻿// 消息状态管理（Zustand）
 import { create } from "zustand";
-import type { ChatMessage, PermissionRequest, ToolCall } from "../types";
+import type { ChatMessage, PermissionRequest, PendingPlan, ToolCall, SubAgentStatus } from "../types";
 
 interface ChatStore {
   messages: ChatMessage[];
   pendingPermission: PermissionRequest | null;
+  pendingPlan: PendingPlan | null;
   isStreaming: boolean;
   engineStatus: "disconnected" | "initializing" | "ready" | "error";
   engineInfo: { provider: string; model: string; permission_mode: string } | null;
@@ -15,6 +16,7 @@ interface ChatStore {
   // 本会话累计 token 用量（后端 UsageEvent 发的是单次增量，前端在此累加）。
   // 状态栏显示用；新会话 / 切换会话 / 切换目录时清零。
   sessionUsage: { input_tokens: number; output_tokens: number };
+  subAgentStatuses: SubAgentStatus[];
 
   // 动作
   setEngineStatus: (s: ChatStore["engineStatus"]) => void;
@@ -27,13 +29,16 @@ interface ChatStore {
   startAssistantMessage: () => string; // 返回消息 id
   appendStreamText: (msgId: string, text: string) => void;
   appendThinking: (msgId: string, text: string) => void;
+  setActivity: (msgId: string, activity: string) => void;
   addToolUse: (msgId: string, tool: ToolCall) => void;
   updateToolResult: (msgId: string, toolId: string, result: Partial<ToolCall>) => void;
   setMessageUsage: (msgId: string, usage: { input_tokens: number; output_tokens: number }) => void;
   completeMessage: (msgId: string, status: "complete" | "error") => void;
   setStreaming: (s: boolean) => void;
   setPendingPermission: (p: PermissionRequest | null) => void;
+  setPendingPlan: (p: PendingPlan | null) => void;
   setError: (msg: string | null) => void;
+  updateSubAgentStatus: (status: SubAgentStatus) => void;
   reset: () => void;
 }
 
@@ -43,12 +48,14 @@ const genId = () => `msg-${Date.now()}-${idCounter++}`;
 export const useChatStore = create<ChatStore>((set) => ({
   messages: [],
   pendingPermission: null,
+  pendingPlan: null,
   isStreaming: false,
   engineStatus: "disconnected",
   engineInfo: null,
   errorMessage: null,
   workDir: null,
   sessionUsage: { input_tokens: 0, output_tokens: 0 },
+      subAgentStatuses: [],
 
   setEngineStatus: (s) => set({ engineStatus: s }),
   setEngineInfo: (info) => set({ engineInfo: info }),
@@ -65,11 +72,24 @@ export const useChatStore = create<ChatStore>((set) => ({
       },
     })),
   resetSessionUsage: () => set({ sessionUsage: { input_tokens: 0, output_tokens: 0 } }),
+  updateSubAgentStatus: (status: SubAgentStatus) =>
+    set((state) => {
+      const existing = state.subAgentStatuses.find((s) => s.task_id === status.task_id);
+      if (existing) {
+        return {
+          subAgentStatuses: state.subAgentStatuses.map((s) =>
+            s.task_id === status.task_id ? status : s
+          ),
+        };
+      } else {
+        return { subAgentStatuses: [...state.subAgentStatuses, status] };
+      }
+    }),
   addUserMessage: (text) =>
     set((state) => ({
       messages: [
         ...state.messages,
-        { id: genId(), role: "user", content: text, thinking: "", toolCalls: [], status: "complete" },
+        { id: genId(), role: "user", content: text, thinking: "", activity: "", toolCalls: [], status: "complete" },
       ],
     })),
   startAssistantMessage: () => {
@@ -77,7 +97,7 @@ export const useChatStore = create<ChatStore>((set) => ({
     set((state) => ({
       messages: [
         ...state.messages,
-        { id, role: "assistant", content: "", thinking: "", toolCalls: [], status: "streaming" },
+        { id, role: "assistant", content: "", thinking: "", activity: "准备开始工作…", toolCalls: [], status: "streaming" },
       ],
     }));
     return id;
@@ -91,8 +111,18 @@ export const useChatStore = create<ChatStore>((set) => ({
   appendThinking: (msgId, text) =>
     set((state) => ({
       messages: state.messages.map((m) =>
-        m.id === msgId ? { ...m, thinking: m.thinking + text } : m
+        m.id === msgId
+          ? {
+              ...m,
+              // 思考仅用于过程面板，设置上限避免长任务无限堆积内存。
+              thinking: (m.thinking + text).slice(-20000),
+            }
+          : m
       ),
+    })),
+  setActivity: (msgId, activity) =>
+    set((state) => ({
+      messages: state.messages.map((m) => (m.id === msgId ? { ...m, activity } : m)),
     })),
   addToolUse: (msgId, tool) =>
     set((state) => ({
@@ -123,13 +153,18 @@ export const useChatStore = create<ChatStore>((set) => ({
     })),
   setStreaming: (s) => set({ isStreaming: s }),
   setPendingPermission: (p) => set({ pendingPermission: p }),
+  setPendingPlan: (p) => set({ pendingPlan: p }),
   setError: (msg) => set({ errorMessage: msg }),
   reset: () =>
     set({
       messages: [],
       pendingPermission: null,
+      pendingPlan: null,
       isStreaming: false,
       errorMessage: null,
       sessionUsage: { input_tokens: 0, output_tokens: 0 },
+      subAgentStatuses: [],
     }),
 }));
+
+

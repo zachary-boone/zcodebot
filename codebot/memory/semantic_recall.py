@@ -43,6 +43,21 @@ DEFAULT_TOP_K = 5
 # 单条记忆正文的截断长度，避免超长记忆撑爆 embedding 输入
 MAX_MEMORY_CHARS = 4000
 
+# embedding 连续失败后的冷却时间（秒）。
+#
+# 为什么需要：embedding 服务挂掉或鉴权失效时，ensure() 原本每次调用都会重新读
+# 全部记忆正文、再发一次注定失败的请求——而这是发生在每条用户消息的召回路径上。
+# 失败后进入冷却，冷却期内 is_available() 返回 False，上层直接走 LLM 选择器，
+# 不再浪费这次请求。冷却到期后自动重试，能自愈。
+EMBED_FAILURE_COOLDOWN = 120.0
+
+# 单次 ensure() 最多新索引的记忆条数。
+#
+# 为什么需要：首次全量建索引可能有几百上千条，一次性做完会远超调用方的超时预算
+# （app.py 给记忆召回留了 8 秒）。改成按 mtime 从新到旧分批，每次调用推进一批，
+# 既保证最新的记忆最先可用，也保证首条消息不被冷启动拖住。
+MAX_EMBED_PER_ENSURE = 40
+
 
 @dataclass
 class MemoryVector:
@@ -66,17 +81,29 @@ class SemanticMemoryIndex:
         embedder: EmbeddingProvider,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
         top_k: int = DEFAULT_TOP_K,
+        max_embed_per_ensure: int = MAX_EMBED_PER_ENSURE,
+        cooldown_seconds: float = EMBED_FAILURE_COOLDOWN,
     ) -> None:
         self._embedder = embedder
         self._threshold = similarity_threshold
         self._top_k = top_k
+        self._max_embed_per_ensure = max_embed_per_ensure
+        self._cooldown_seconds = cooldown_seconds
         # file_path -> MemoryVector
         self._index: dict[str, MemoryVector] = {}
         # 已索引过的记忆（用于检测删除）
         self._known_paths: set[str] = set()
+        # embedding 连续失败后的冷却截止时间（monotonic 秒）
+        self._degraded_until: float = 0.0
 
     def is_available(self) -> bool:
-        """embedding 是否可用。上层据此决定是否走语义检索。"""
+        """embedding 是否可用且不在失败冷却期内。
+
+        上层据此决定是否走语义检索——冷却期内返回 False，
+        让调用方直接走 LLM 选择器，避免每次召回都白跑一次失败请求。
+        """
+        if time.monotonic() < self._degraded_until:
+            return False
         return self._embedder.is_available()
 
     async def ensure(self, headers: list[MemoryHeader]) -> None:
@@ -98,8 +125,9 @@ class SemanticMemoryIndex:
                 self._known_paths.discard(path)
 
         # 2. 增量 embedding 新增/变化的记忆
-        to_embed: list[tuple[str, str]] = []  # (file_path, text)
-        pending: list[MemoryVector] = []
+        #    先收集待索引项，再按 mtime 从新到旧排序、截断到单次上限——
+        #    首次全量建索引时分多次调用逐步补齐，且最新的记忆最先可用。
+        todo: list[tuple[int, str, str, str]] = []  # (mtime_ms, path, text, hash)
         for h in headers:
             existing = self._index.get(h.file_path)
             if existing and existing.mtime_ms == h.mtime_ms:
@@ -115,28 +143,34 @@ class SemanticMemoryIndex:
                 existing.mtime_ms = h.mtime_ms
                 continue
 
-            to_embed.append((h.file_path, text))
-            pending.append(
-                MemoryVector(
-                    file_path=h.file_path,
-                    mtime_ms=h.mtime_ms,
-                    content_hash=content_hash,
-                )
-            )
+            todo.append((h.mtime_ms, h.file_path, text, content_hash))
 
-        if not to_embed:
+        if not todo:
             return
+
+        todo.sort(key=lambda x: x[0], reverse=True)
+        todo = todo[: self._max_embed_per_ensure]
 
         try:
-            vectors = await self._embedder.embed([t for _, t in to_embed])
+            vectors = await self._embedder.embed([t for _, _, t, _ in todo])
         except EmbeddingError as e:
-            log.warning("记忆 embedding 失败，索引保持现状: %s", e)
+            was_healthy = self._degraded_until <= 0.0
+            self._degraded_until = time.monotonic() + self._cooldown_seconds
+            if was_healthy:
+                log.warning(
+                    "记忆 embedding 失败，索引保持现状并进入 %.0f 秒冷却"
+                    "（期间记忆召回直接走 LLM 选择器）: %s",
+                    self._cooldown_seconds, e,
+                )
             return
 
-        for mv, vec in zip(pending, vectors):
-            mv.vector = vec
-            self._index[mv.file_path] = mv
-            self._known_paths.add(mv.file_path)
+        self._degraded_until = 0.0  # 成功即恢复
+        for (mtime_ms, path, _text, content_hash), vec in zip(todo, vectors):
+            self._index[path] = MemoryVector(
+                file_path=path, mtime_ms=mtime_ms,
+                content_hash=content_hash, vector=vec,
+            )
+            self._known_paths.add(path)
 
     async def search(self, query: str) -> list[str]:
         """语义检索：返回最相关的 top_k 个记忆 file_path。

@@ -9,12 +9,15 @@
   - Anthropic 暂无官方 embedding 端点，走 OpenAI 兼容协议兜底
     （多数 Anthropic 用户会另配一个 OpenAI 兼容的 embedding 来源，或用本地模型）
   - 失败永不抛出阻断主流程——上层用 is_available() 判断后决定是否降级
+  - 批量切分在 ``OpenAIEmbedding`` 内部完成：调用方可以放心把「一个文件的所有块」
+    或「全部记忆正文」一次性传进来，不需要自己关心服务商的批量上限
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -47,6 +50,66 @@ class EmbeddingProvider(ABC):
     def is_available(self) -> bool:
         """是否可用。Null 实现返回 False，上层据此降级。"""
         return True
+
+
+# ---------------------------------------------------------------------------
+# 批量切分：单次 embedding 请求的规模保护
+# ---------------------------------------------------------------------------
+#
+# 为什么要在这里切分（而不是让调用方自己切）：
+# 各家 /v1/embeddings 对单次请求的规模都有上限，而且这个上限**通常是按总 token
+# 动态算的，不是固定条数**——DashScope 的 qwen3.7-text-embedding-flash 在同一批
+# 语料上先后返回过 "should not be larger than 25" 和 "should not be larger than 20"。
+# 调用方（记忆索引、代码索引）各自去猜上限既重复又容易漏，所以在 provider 层
+# 统一处理：既按条数切、也按估算 token 切，取更严的那个。
+MAX_BATCH_ITEMS = 20
+MAX_BATCH_TOKENS = 5000
+
+# 判定「服务端嫌批量太大」的错误特征。只有命中才折半重试；其他错误
+# （鉴权 / 网络 / 限流）直接上抛，避免把可重试错误拖成 N 次半量请求。
+_BATCH_TOO_LARGE_RE = re.compile(
+    r"batch\s*size|too\s*large|too\s*many|exceeds?\b|maximum\s*batch",
+    re.IGNORECASE,
+)
+
+
+def estimate_tokens(text: str) -> int:
+    """粗略估算文本的 token 数，只用于切分批次。
+
+    中文按约 1 token/字、其他字符按约 3 字符/token，并额外留 20% 余量。
+    宁可高估——高估只会让批次更小（代价是请求数变多），低估则会让整批被拒。
+    """
+    cjk = 0
+    for ch in text:
+        if "\u2e80" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff":
+            cjk += 1
+    other = len(text) - cjk
+    return int(cjk * 1.2) + other // 3 + 1
+
+
+def plan_batches(
+    texts: list[str],
+    max_items: int = MAX_BATCH_ITEMS,
+    max_tokens: int = MAX_BATCH_TOKENS,
+) -> list[list[str]]:
+    """按「条数 + 估算 token」双约束把文本切成批次。
+
+    单条文本即使本身就超过 max_tokens 也会独占一批（交给服务端返回真实错误，
+    而不是在这里静默丢弃）。
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        n = estimate_tokens(text)
+        if current and (len(current) >= max_items or current_tokens + n > max_tokens):
+            batches.append(current)
+            current, current_tokens = [], 0
+        current.append(text)
+        current_tokens += n
+    if current:
+        batches.append(current)
+    return batches
 
 
 # ---------------------------------------------------------------------------
@@ -108,18 +171,44 @@ class OpenAIEmbedding(EmbeddingProvider):
         return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        """对一批文本做 embedding。
+
+        内部按 plan_batches 切分后依次请求，返回顺序与输入一致。
+        调用方可以直接传入整批（哪怕几百条），不需要自己分批。
+        """
         if not texts:
             return []
+        vectors: list[list[float]] = []
+        batches = plan_batches(texts)
+        for batch in batches:
+            vectors.extend(await self._embed_batch(batch))
+        if self._dim is None and vectors:
+            self._dim = len(vectors[0])
+        return vectors
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        """发一个批次的请求。
+
+        服务端若因批量过大而拒绝，对半折分重试——不同服务商、甚至同一服务商
+        不同入参长度下的上限都不一样，硬编码单一条数不可靠。折分到单条仍然
+        失败时，才当作真实错误上抛。
+        """
         try:
             resp = await self._client.embeddings.create(
-                input=texts,
+                input=batch,
                 model=self._model,
             )
-            vectors = [d.embedding for d in resp.data]
-            if self._dim is None and vectors:
-                self._dim = len(vectors[0])
-            return vectors
-        except Exception as e:  # 网络 / 鉴权 / 限流统一降级
+            return [d.embedding for d in resp.data]
+        except Exception as e:  # 网络 / 鉴权 / 限流 / 批量过大 统一在这里分流
+            if len(batch) > 1 and _BATCH_TOO_LARGE_RE.search(str(e)):
+                mid = len(batch) // 2
+                log.debug(
+                    "embedding 批次（%d 条）被服务端拒绝，折半重试：%s",
+                    len(batch), str(e)[:140],
+                )
+                head = await self._embed_batch(batch[:mid])
+                tail = await self._embed_batch(batch[mid:])
+                return head + tail
             raise EmbeddingError(f"embedding 调用失败: {e}") from e
 
 
@@ -201,5 +290,12 @@ def _pick_embedding_model(chat_model: str, base_url: str) -> str:
     lowered = chat_model.lower()
     if "embed" in lowered or "bge" in lowered or "nomic" in lowered:
         return chat_model
-    # 默认走 OpenAI 标准模型（兼容服务大多也支持）
+    # 名字不像 embedding 模型 → 说明这里很可能拿到的是聊天 provider（配置里
+    # 的 embedding_provider 缺失或被忽略）。默认值只对 OpenAI 及其同构服务有效，
+    # 对上其他厂商会直接 404，所以这里留一条 warning，别让问题静默。
+    log.warning(
+        "embedding 模型名 %r 不像 embedding 模型，回退到 text-embedding-3-small"
+        "（base_url=%s）。如果 404，请在配置里补 embedding_provider。",
+        chat_model, base_url,
+    )
     return "text-embedding-3-small"

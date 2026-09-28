@@ -2,7 +2,7 @@
 name: Verification
 description: 验证专家，尝试打破实现找到隐藏 bug，输出 VERDICT 判定
 model: inherit
-background: true
+permissionMode: dontAsk
 disallowedTools:
   - Agent
   - EditFile

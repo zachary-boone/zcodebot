@@ -1,5 +1,5 @@
-// 顶部状态栏：模型信息、工作目录切换、权限模式切换、主题切换
-import { Shield, Sun, Moon, ChevronDown, Folder, FolderOpen } from "lucide-react";
+﻿// 顶部状态栏：模型信息、工作目录切换、权限模式切换、主题切换
+import { Shield, Sun, Moon, ChevronDown, Folder, FolderOpen, Activity, Check, XCircle } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "../store/chatStore";
 import { useThemeStore } from "../store/themeStore";
@@ -8,7 +8,7 @@ const MODES = [
   { value: "default", label: "默认（写入询问）" },
   { value: "acceptEdits", label: "自动接受编辑" },
   { value: "plan", label: "规划模式" },
-  { value: "bypass", label: "跳过所有检查" },
+  { value: "bypassPermissions", label: "跳过所有检查" },
 ];
 
 function getModeLabel(value: string): string {
@@ -37,9 +37,12 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
   const sessionUsage = useChatStore((s) => s.sessionUsage);
   const totalTokens = sessionUsage.input_tokens + sessionUsage.output_tokens;
   const theme = useThemeStore((s) => s.theme);
+  const subAgentStatuses = useChatStore((s) => s.subAgentStatuses);
+  const isStreaming = useChatStore((s) => s.isStreaming);
   const toggleTheme = useThemeStore((s) => s.toggle);
 
   const [modeOpen, setModeOpen] = useState(false);
+  const [subAgentsOpen, setSubAgentsOpen] = useState(false);
   const modeRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -124,6 +127,52 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
           {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
         </button>
 
+        {/* 子Agent状态 */}
+        {subAgentStatuses.length > 0 && (
+          <div className="relative">
+            <button
+              onClick={() => setSubAgentsOpen((v) => !v)}
+              className="flex items-center gap-1.5 text-text-tertiary hover:text-text-secondary transition-colors"
+              title="查看子 Agent 进度"
+            >
+              <Activity size={12} />
+              <span>子Agent {subAgentStatuses.filter((s) => s.status === "running").length}/{subAgentStatuses.length}</span>
+            </button>
+            {subAgentsOpen && (
+              <div className="absolute right-0 top-full mt-2 w-80 max-w-[calc(100vw-2rem)] bg-bg-secondary border border-border rounded-lg shadow-xl p-2 z-50 space-y-1.5">
+                {subAgentStatuses.map((status) => {
+                  const running = status.status === "running";
+                  return (
+                    <div key={status.task_id} className="rounded-md bg-bg-tertiary px-2.5 py-2 text-left">
+                      <div className="flex items-center gap-1.5 text-xs text-text-primary">
+                        {running ? <Activity size={12} className="text-accent animate-pulse" /> : status.status === "completed" ? <Check size={12} className="text-emerald-400" /> : <XCircle size={12} className="text-red-400" />}
+                        <span className="font-medium truncate">{status.agent_name}</span>
+                        <span className="ml-auto text-[10px] text-text-tertiary">{status.status === "running" ? "运行中" : status.status === "completed" ? "已完成" : "失败"}</span>
+                      </div>
+                      <div className="mt-1 text-[11px] text-text-secondary line-clamp-2">{status.task_description}</div>
+                      <div className="mt-1 flex items-center gap-2 text-[10px] text-text-tertiary">
+                        <span>工具 {status.progress.tool_call_count}</span>
+                        <span>Token {(status.progress.input_tokens + status.progress.output_tokens).toLocaleString()}</span>
+                        {status.progress.last_activity && <span className="truncate">{status.progress.last_activity}</span>}
+                      </div>
+                      {status.status === "completed" && status.result && (
+                        <div className="mt-1 text-[10px] text-emerald-300/80 line-clamp-2">结果已注入主 Agent 上下文</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {isStreaming && (
+          <span className="flex items-center gap-1 text-accent" title="Agent 正在工作">
+            <Activity size={12} className="animate-pulse" />
+            工作中...
+          </span>
+        )}
+
         {/* 连接状态 */}
         <span className={`flex items-center gap-1 ${statusColor}`}>
           <span className={`w-1.5 h-1.5 rounded-full ${
@@ -135,3 +184,6 @@ export function StatusBar({ onSwitchMode, onSwitchWorkDir }: Props) {
     </div>
   );
 }
+
+
+

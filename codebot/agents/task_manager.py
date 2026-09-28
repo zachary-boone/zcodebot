@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
@@ -6,6 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
+from codebot.agent import SubAgentStatusEvent
 
 if TYPE_CHECKING:
     from codebot.agent import Agent
@@ -43,6 +44,14 @@ class TaskManager:
         self._notify_queue: asyncio.Queue[str] = asyncio.Queue()
         self._async_tasks: dict[str, asyncio.Task[None]] = {}
 
+        self._on_status_change = None
+        self._status_queue = asyncio.Queue()
+        self._on_status_change = None
+
+    def set_on_status_change(self, callback):
+        self._on_status_change = callback
+        def set_on_status_change(self, callback):
+            self._on_status_change = callback
 
     def launch(
         self,
@@ -60,6 +69,18 @@ class TaskManager:
         )
         self._tasks[task_id] = bg
 
+        # Emit running status event
+        running_event = SubAgentStatusEvent(
+            task_id=task_id,
+            agent_name=bg.name,
+            status="running",
+            task_description=bg.task,
+            result="",
+            progress=self._progress_dict(bg),
+        )
+        self._status_queue.put_nowait(running_event)
+
+
         async_task = asyncio.create_task(
             self._run_background(task_id, fork_conversation)
         )
@@ -67,6 +88,97 @@ class TaskManager:
 
         bg.cancel = async_task.cancel
         return task_id
+
+    def start_foreground(self, agent: Any, task: str, name: str = "") -> str:
+        """Register an inline worker so its progress is visible to the UI.
+
+        Inline workers are awaited by the parent Agent, so they must not be
+        scheduled through ``launch`` (which is intentionally fire-and-forget).
+        They still share the same status stream as background tasks.
+        """
+        task_id = uuid.uuid4().hex[:8]
+        bg = BackgroundTask(id=task_id, name=name or task_id, agent=agent, task=task)
+        self._tasks[task_id] = bg
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=task_id,
+            agent_name=bg.name,
+            status="running",
+            task_description=bg.task,
+            result="",
+            progress=self._progress_dict(bg),
+        ))
+        return task_id
+
+    @staticmethod
+    def _progress_dict(bg: BackgroundTask) -> dict[str, Any]:
+        return {
+            "tool_call_count": bg.progress.tool_call_count,
+            "input_tokens": bg.progress.input_tokens,
+            "output_tokens": bg.progress.output_tokens,
+            "last_activity": bg.progress.last_activity,
+        }
+
+    def update_progress(
+        self,
+        task_id: str,
+        *,
+        tool_call_delta: int = 0,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        last_activity: str = "",
+    ) -> None:
+        bg = self._tasks.get(task_id)
+        if bg is None or bg.status != "running":
+            return
+        bg.progress.tool_call_count += tool_call_delta
+        if input_tokens is not None:
+            bg.progress.input_tokens = input_tokens
+        if output_tokens is not None:
+            bg.progress.output_tokens = output_tokens
+        if last_activity:
+            bg.progress.last_activity = last_activity
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=bg.id,
+            agent_name=bg.name,
+            status=bg.status,
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        ))
+
+    def complete_foreground(self, task_id: str, result: str = "") -> None:
+        bg = self._tasks.get(task_id)
+        if bg is None:
+            return
+        bg.status = "completed"
+        bg.result = result
+        bg.end_time = time.monotonic()
+        bg.progress.input_tokens = bg.agent.total_input_tokens
+        bg.progress.output_tokens = bg.agent.total_output_tokens
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=bg.id,
+            agent_name=bg.name,
+            status=bg.status,
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        ))
+
+    def fail_foreground(self, task_id: str, result: str) -> None:
+        bg = self._tasks.get(task_id)
+        if bg is None:
+            return
+        bg.status = "failed"
+        bg.result = result
+        bg.end_time = time.monotonic()
+        self._status_queue.put_nowait(SubAgentStatusEvent(
+            task_id=bg.id,
+            agent_name=bg.name,
+            status=bg.status,
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        ))
 
 
     async def _run_background(
@@ -76,13 +188,48 @@ class TaskManager:
         if bg is None:
             return
 
+        def on_progress(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "tool_use":
+                self.update_progress(
+                    task_id,
+                    tool_call_delta=1,
+                    last_activity=f"正在调用 {event.get('toolName', '工具')}",
+                )
+            elif event_type == "usage":
+                usage = event.get("usage") or {}
+                self.update_progress(
+                    task_id,
+                    input_tokens=int(usage.get("inputTokens", 0)),
+                    output_tokens=int(usage.get("outputTokens", 0)),
+                    last_activity="正在分析结果",
+                )
+
         try:
             if fork_conversation is not None:
-                result = await bg.agent.run_to_completion("", fork_conversation)
+                result = await bg.agent.run_to_completion(
+                    "", fork_conversation, event_callback=on_progress
+                )
             else:
-                result = await bg.agent.run_to_completion(bg.task)
+                result = await bg.agent.run_to_completion(
+                    bg.task, event_callback=on_progress
+                )
             bg.result = result
             bg.status = "completed"
+            event = SubAgentStatusEvent(
+                task_id=bg.id,
+                agent_name=bg.name,
+                status=bg.status,
+                task_description=bg.task,
+                result=bg.result,
+                progress={
+                    "tool_call_count": bg.progress.tool_call_count,
+                    "input_tokens": bg.progress.input_tokens,
+                    "output_tokens": bg.progress.output_tokens,
+                    "last_activity": bg.progress.last_activity,
+                },
+            )
+            await self._status_queue.put(event)
 
             if bg.agent.team_name and bg.agent._team_manager:
                 mailbox = bg.agent._team_manager.get_mailbox(bg.agent.team_name)
@@ -116,10 +263,38 @@ class TaskManager:
 
         except asyncio.CancelledError:
             bg.status = "cancelled"
+            event = SubAgentStatusEvent(
+                task_id=bg.id,
+                agent_name=bg.name,
+                status=bg.status,
+                task_description=bg.task,
+                result=bg.result,
+                progress={
+                    "tool_call_count": bg.progress.tool_call_count,
+                    "input_tokens": bg.progress.input_tokens,
+                    "output_tokens": bg.progress.output_tokens,
+                    "last_activity": bg.progress.last_activity,
+                },
+            )
+            await self._status_queue.put(event)
             bg.result = "Task was cancelled"
         except Exception as e:
             log.error("Background task %s failed: %s", task_id, e)
             bg.status = "failed"
+            event = SubAgentStatusEvent(
+                task_id=bg.id,
+                agent_name=bg.name,
+                status=bg.status,
+                task_description=bg.task,
+                result=bg.result,
+                progress={
+                    "tool_call_count": bg.progress.tool_call_count,
+                    "input_tokens": bg.progress.input_tokens,
+                    "output_tokens": bg.progress.output_tokens,
+                    "last_activity": bg.progress.last_activity,
+                },
+            )
+            await self._status_queue.put(event)
             bg.result = f"Error: {e}"
         finally:
             bg.end_time = time.monotonic()
@@ -149,6 +324,17 @@ class TaskManager:
         async_task = asyncio.create_task(self._continue_background(task_id))
         self._async_tasks[task_id] = async_task
         bg.cancel = async_task.cancel
+
+        # Emit running status event
+        running_event = SubAgentStatusEvent(
+            task_id=task_id,
+            agent_name=bg.name,
+            status="running",
+            task_description=bg.task,
+            result=bg.result,
+            progress=self._progress_dict(bg),
+        )
+        self._status_queue.put_nowait(running_event)
         return task_id
 
 
@@ -157,15 +343,76 @@ class TaskManager:
         if bg is None:
             return
 
+        def on_progress(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "tool_use":
+                self.update_progress(
+                    task_id,
+                    tool_call_delta=1,
+                    last_activity=f"正在调用 {event.get('toolName', '工具')}",
+                )
+            elif event_type == "usage":
+                usage = event.get("usage") or {}
+                self.update_progress(
+                    task_id,
+                    input_tokens=int(usage.get("inputTokens", 0)),
+                    output_tokens=int(usage.get("outputTokens", 0)),
+                    last_activity="正在分析结果",
+                )
+
         try:
-            result = await bg.agent.run_to_completion(bg.task)
+            result = await bg.agent.run_to_completion(
+                bg.task, event_callback=on_progress
+            )
             bg.result = (bg.result + "\n" + result).strip() if bg.result else result
             bg.status = "completed"
+            event = SubAgentStatusEvent(
+                task_id=bg.id,
+                agent_name=bg.name,
+                status=bg.status,
+                task_description=bg.task,
+                result=bg.result,
+                progress={
+                    "tool_call_count": bg.progress.tool_call_count,
+                    "input_tokens": bg.progress.input_tokens,
+                    "output_tokens": bg.progress.output_tokens,
+                    "last_activity": bg.progress.last_activity,
+                },
+            )
+            await self._status_queue.put(event)
         except asyncio.CancelledError:
             bg.status = "cancelled"
+            event = SubAgentStatusEvent(
+                task_id=bg.id,
+                agent_name=bg.name,
+                status=bg.status,
+                task_description=bg.task,
+                result=bg.result,
+                progress={
+                    "tool_call_count": bg.progress.tool_call_count,
+                    "input_tokens": bg.progress.input_tokens,
+                    "output_tokens": bg.progress.output_tokens,
+                    "last_activity": bg.progress.last_activity,
+                },
+            )
+            await self._status_queue.put(event)
         except Exception as e:
             log.error("Background task %s failed: %s", task_id, e)
             bg.status = "failed"
+            event = SubAgentStatusEvent(
+                task_id=bg.id,
+                agent_name=bg.name,
+                status=bg.status,
+                task_description=bg.task,
+                result=bg.result,
+                progress={
+                    "tool_call_count": bg.progress.tool_call_count,
+                    "input_tokens": bg.progress.input_tokens,
+                    "output_tokens": bg.progress.output_tokens,
+                    "last_activity": bg.progress.last_activity,
+                },
+            )
+            await self._status_queue.put(event)
             bg.result = f"Error: {e}"
         finally:
             bg.end_time = time.monotonic()
@@ -190,6 +437,15 @@ class TaskManager:
             return True
         return False
 
+    async def consume_status_events(self):
+        events = []
+        while not self._status_queue.empty():
+            try:
+                event = self._status_queue.get_nowait()
+                events.append(event)
+            except asyncio.QueueEmpty:
+                break
+        return events
     def poll_completed(self) -> list[BackgroundTask]:
         completed: list[BackgroundTask] = []
         while not self._notify_queue.empty():

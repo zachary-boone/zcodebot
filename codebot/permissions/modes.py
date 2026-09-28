@@ -19,6 +19,8 @@ class PermissionMode(str, Enum):
 
 
 _MODE_MATRIX: dict[PermissionMode, dict[ToolCategory, DecisionEffect]] = {
+    # BYPASS 与 DONT_ASK 当前都自动放行三类工具；两者保留是为了兼容现有
+    # 配置语义，未来加入审计日志或更细粒度策略时仍可分别演进。
     PermissionMode.DEFAULT: {"read": "allow", "write": "ask", "command": "ask"},
     PermissionMode.ACCEPT_EDITS: {"read": "allow", "write": "allow", "command": "ask"},
     PermissionMode.PLAN: {"read": "allow", "write": "ask", "command": "ask"},

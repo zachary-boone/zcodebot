@@ -62,7 +62,7 @@ CodeBot 是一个协议中立、可扩展的 AI Coding Agent。它以**桌面版
 ### 安装
 
 ```bash
-git clone https://github.com/1144zhang/terminal-codebot.git && cd terminal-codebot
+git clone https://github.com/zachary-boone/zcodebot.git && cd zcodebot
 
 # 创建虚拟环境并安装（TUI 基础版）
 uv venv
@@ -105,6 +105,14 @@ providers:
     model: deepseek-chat
     api_key: ${OPENAI_API_KEY}
     thinking: false
+
+# 可选：为 RAG 单独配置 embedding provider
+embedding_provider:
+  name: qwen-embedding
+  protocol: openai-compat
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen3.7-text-embedding-flash
+  api_key: ${QWEN_EMBEDDING_API_KEY}
 
 permission_mode: default
 
@@ -302,7 +310,7 @@ hooks:
 ## 项目结构
 
 ```text
-terminal-codebot/
+zcodebot/
 ├── codebot/                  # Python 引擎
 │   ├── agent.py              # Agent 主循环（ReAct / Plan，async generator 事件流）
 │   ├── app.py                # Textual TUI 应用

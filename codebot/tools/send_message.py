@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
 import logging
@@ -38,7 +34,8 @@ class SendMessageTool(Tool):
     )
     params_model = SendMessageParams
     category = "command"
-    is_concurrency_safe = True
+    # 修改共享团队状态，不能进入不经过权限检查的并发批。
+    is_concurrency_safe = False
 
 
     def __init__(
