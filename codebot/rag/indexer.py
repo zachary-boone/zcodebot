@@ -189,6 +189,8 @@ class IncrementalIndexer:
         for rel in list(self._meta.keys()):
             if rel not in current_files:
                 await self._store.delete_by_file(rel)
+                if self._bm25 is not None:
+                    self._bm25.delete_docs(self._meta[rel].chunk_ids)
                 self._meta.pop(rel, None)
                 stats["deleted"] += 1
 
@@ -204,11 +206,19 @@ class IncrementalIndexer:
             try:
                 chunks = chunk_file(path, self._root)
                 if not chunks:
+                    # 文件变为空文件或无法再分块时，旧块也必须清理。
+                    if rel in self._meta:
+                        await self._store.delete_by_file(rel)
+                        if self._bm25 is not None:
+                            self._bm25.delete_docs(self._meta[rel].chunk_ids)
+                        self._meta.pop(rel, None)
                     continue
 
                 # 先删旧块（文件内容变了，旧块可能过时）
                 if rel in self._meta:
                     await self._store.delete_by_file(rel)
+                    if self._bm25 is not None:
+                        self._bm25.delete_docs(self._meta[rel].chunk_ids)
 
                 await self._store.upsert_chunks(chunks)
 

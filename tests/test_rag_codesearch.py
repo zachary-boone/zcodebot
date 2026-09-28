@@ -159,6 +159,16 @@ class TestBM25:
         results = index.search("old", top_k=5)
         assert results == []
 
+    def test_delete_docs_removes_postings(self):
+        """删除文档后，倒排表和 BM25 统计都应同步更新。"""
+        index = BM25Index()
+        index.add_docs([("d1", "stale token"), ("d2", "fresh token")])
+        index.delete_docs(["d1"])
+
+        assert index.size == 1
+        assert index.search("stale", top_k=5) == []
+        assert index.search("fresh", top_k=5)[0][0] == "d2"
+
 
 # ---------------------------------------------------------------------------
 # RRF 融合测试
