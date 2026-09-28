@@ -106,6 +106,14 @@ providers:
     api_key: ${OPENAI_API_KEY}
     thinking: false
 
+# 可选：为 RAG 单独配置 embedding provider
+embedding_provider:
+  name: qwen-embedding
+  protocol: openai-compat
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen3.7-text-embedding-flash
+  api_key: ${QWEN_EMBEDDING_API_KEY}
+
 permission_mode: default
 
 mcp_servers: []

@@ -50,7 +50,7 @@ class ProviderConfig:
 
     def resolve_api_key(self) -> str:
         if self.api_key:
-            return self.api_key
+            return resolve_env_vars(self.api_key)
         env_var = _ENV_KEY_MAP.get(self.protocol, "")
         return os.environ.get(env_var, "")
 
@@ -139,6 +139,7 @@ class EngineConfig:
 @dataclass
 class AppConfig:
     providers: list[ProviderConfig]
+    embedding_provider: ProviderConfig | None = None
     permission_mode: str = "default"
     mcp_servers: list[MCPServerConfig] = field(default_factory=list)
     raw_hooks: list[dict] = field(default_factory=list)
@@ -174,6 +175,22 @@ def _load_single_file(path: Path) -> AppConfig:
         for p in validated["providers"]
     ]
 
+    embedding_raw = validated["embedding_provider"]
+    embedding_provider = (
+        ProviderConfig(
+            name=embedding_raw["name"],
+            protocol=embedding_raw["protocol"],
+            base_url=embedding_raw["base_url"],
+            model=embedding_raw["model"],
+            api_key=embedding_raw["api_key"],
+            thinking=embedding_raw["thinking"],
+            context_window=embedding_raw["context_window"],
+            max_output_tokens=embedding_raw["max_output_tokens"],
+        )
+        if embedding_raw is not None
+        else None
+    )
+
     mcp_servers = [
         MCPServerConfig(
             name=s["name"],
@@ -206,6 +223,7 @@ def _load_single_file(path: Path) -> AppConfig:
 
     return AppConfig(
         providers=providers,
+        embedding_provider=embedding_provider,
         permission_mode=validated["permission_mode"],
         mcp_servers=mcp_servers,
         raw_hooks=validated["hooks"],
@@ -227,6 +245,8 @@ def _hook_key(hook: dict) -> tuple:
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
     if override.providers:
         base.providers = override.providers
+    if override.embedding_provider is not None:
+        base.embedding_provider = override.embedding_provider
     if override.permission_mode != "default":
         base.permission_mode = override.permission_mode
 

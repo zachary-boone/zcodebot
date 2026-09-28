@@ -109,6 +109,14 @@ def validate_providers(raw_providers: list) -> list[dict]:
     return providers
 
 
+def validate_embedding_provider(raw_provider: object) -> dict | None:
+    """校验可选的独立 embedding provider，复用主 provider 的字段规则。"""
+    if raw_provider is None:
+        return None
+    providers = validate_providers([raw_provider])
+    return providers[0]
+
+
 def validate_permission_mode(mode: str) -> str:
     """校验 permission_mode 取值。"""
     if mode not in VALID_PERMISSION_MODES:
@@ -241,6 +249,7 @@ def validate_config_structure(raw: object) -> dict:
 
     return {
         "providers": validate_providers(raw["providers"]),
+        "embedding_provider": validate_embedding_provider(raw.get("embedding_provider")),
         "permission_mode": validate_permission_mode(raw.get("permission_mode", "default")),
         "mcp_servers": validate_mcp_servers(raw.get("mcp_servers")),
         "hooks": validate_hooks(raw.get("hooks")),

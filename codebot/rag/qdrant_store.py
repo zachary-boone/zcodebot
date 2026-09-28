@@ -219,6 +219,8 @@ class QdrantCodeStore:
             self._client.delete_collection(COLLECTION)
         except Exception:
             pass
+        # _ensure_collection 读取 self._dim；必须先切换维度再创建新 collection。
+        self._dim = new_dim
         self._ensure_collection()
 
 
