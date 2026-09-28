@@ -38,6 +38,8 @@ class Runtime:
     trace_manager: Any
     hook_engine: HookEngine | None
     config: AppConfig
+    # 跨会话记忆管理器（第一层四类摘要的读写入口）。CLI 与桌面端共用。
+    memory_manager: Any = None
     # 当前工作目录。CLI 用 os.getcwd()；桌面版可在运行时通过 server.set_workdir 切换。
     # 重建 runtime 时此字段会被刷新，REST 接口与 WS 都依赖它定位文件 / 会话 / memory。
     work_dir: str = ""
@@ -61,6 +63,7 @@ async def build_runtime(
     from codebot.agent import Agent
     from codebot.client import create_client, resolve_context_window
     from codebot.conversation import ConversationManager
+    from codebot.memory.auto_memory import MemoryManager
     from codebot.memory.instructions import load_instructions
     from codebot.tools import create_default_registry
     from codebot.agents.loader import AgentLoader
@@ -93,6 +96,14 @@ async def build_runtime(
     )
 
     instructions = load_instructions(work_dir)
+    # 跨会话记忆（第一层）：四类摘要（用户偏好 / 纠正反馈 / 项目知识 / 参考资料）。
+    # 必须在构造 Agent 时传入 memory_manager —— agent 里有两处行为都以它为开关：
+    #   1) agent.py:544 等位置 `memory_manager.load()` → inject_long_term_memory
+    #      （会话启动全量注入四类记忆）
+    #   2) agent.py:723 每 memory_extraction_interval 轮自动抽取并重写 memories.md
+    # 之前 runtime 没传，所以桌面端的记忆子系统整体是关闭的（P2-7）。
+    # 第二层（单条记忆的向量/BM25 召回）本次不接，仍只在终端生效。
+    memory_manager = MemoryManager(work_dir)
     registry = create_default_registry()
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
@@ -144,6 +155,7 @@ async def build_runtime(
         permission_checker=checker,
         context_window=provider.get_context_window(),
         instructions_content=instructions,
+        memory_manager=memory_manager,
         hook_engine=hook_engine,
     )
     # 从配置覆盖引擎参数
@@ -210,6 +222,7 @@ async def build_runtime(
         trace_manager=trace_manager,
         hook_engine=hook_engine,
         config=config,
+        memory_manager=memory_manager,
         work_dir=work_dir,
     )
 

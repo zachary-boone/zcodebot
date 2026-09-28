@@ -91,6 +91,9 @@ def main() -> None:
         worktree_config=config.worktree,
         teammate_mode=config.teammate_mode,
         enable_coordinator_mode=config.enable_coordinator_mode,
+        # embedding 模型常与聊天模型来自不同厂商，必须把配置里的
+        # embedding_provider 传进去；否则会拿聊天 provider 去请求 embedding 端点。
+        embedding_provider=config.embedding_provider,
         driver_class=driver_class,
     )
     app.run()

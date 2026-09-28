@@ -25,7 +25,7 @@ if not exist "node_modules\electron\dist\electron.exe" (
     exit /b 1
   )
   echo Missing Electron runtime. Please run these commands first:
-  echo   cd /d E:\terminal-codebot\codebot-desktop
+  echo   cd /d "%~dp0codebot-desktop"
   echo   npm.cmd install
   pause
   exit /b 1

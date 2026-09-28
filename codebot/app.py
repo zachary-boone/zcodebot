@@ -581,10 +581,14 @@ class CodeBotApp(App):
         worktree_config: Any = None,
         teammate_mode: str = "",
         enable_coordinator_mode: bool = False,
+        embedding_provider: ProviderConfig | None = None,
         driver_class: type | None = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
+        # 独立的 embedding provider（embedding 模型常与聊天模型来自不同厂商）。
+        # 为 None 时才回退到当前聊天 provider——与 runtime.py 的取法保持一致。
+        self._embedding_provider = embedding_provider
         self._initial_permission_mode = permission_mode
         self._mcp_server_configs = mcp_servers or []
         self.hook_engine = hook_engine
@@ -1223,6 +1227,18 @@ class CodeBotApp(App):
         except (asyncio.TimeoutError, Exception):
             return ""
 
+    def _resolve_embedding_provider(self, provider: ProviderConfig) -> ProviderConfig:
+        """解析该用哪个 provider 做 embedding。
+
+        优先用配置里的 embedding_provider（embedding 模型常与聊天模型来自
+        不同厂商），未配置时才回退当前聊天 provider。与 runtime.py 的取法一致。
+
+        修复前这里直接传聊天 provider：模型名被推断成 text-embedding-3-small，
+        请求打到聊天厂商的 base_url（如 api.deepseek.com/v1/embeddings）→ 404，
+        导致记忆语义召回 / CodeSearch / ToolSearch 三条链路全部静默失效。
+        """
+        return self._embedding_provider or provider
+
     def _get_semantic_memory_index(self, provider: ProviderConfig):
         """懒加载记忆语义索引。embedding 不可用时返回 None（上层回退 LLM 选择器）。"""
         if self._semantic_memory_index is not None:
@@ -1231,7 +1247,7 @@ class CodeBotApp(App):
             from codebot.rag import create_embedding_provider
             from codebot.memory.semantic_recall import SemanticMemoryIndex
 
-            embedder = create_embedding_provider(provider)
+            embedder = create_embedding_provider(self._resolve_embedding_provider(provider))
             if not embedder.is_available():
                 return None  # 协议不支持 / key 缺失 → 走 LLM 选择器
             self._semantic_memory_index = SemanticMemoryIndex(embedder)
@@ -1248,7 +1264,9 @@ class CodeBotApp(App):
         if not hasattr(self, "_shared_embedder"):
             try:
                 from codebot.rag import create_embedding_provider
-                self._shared_embedder = create_embedding_provider(provider)
+                self._shared_embedder = create_embedding_provider(
+                    self._resolve_embedding_provider(provider)
+                )
                 if not self._shared_embedder.is_available():
                     self._shared_embedder = None
             except Exception as e:
@@ -1271,7 +1289,7 @@ class CodeBotApp(App):
             from codebot.rag.query_rewriter import QueryRewriter
             from codebot.tools.code_search import CodeSearch
 
-            embedder = create_embedding_provider(provider)
+            embedder = create_embedding_provider(self._resolve_embedding_provider(provider))
             if not embedder.is_available():
                 return  # embedding 不可用 → CodeSearch 保持降级态
 

@@ -23,6 +23,8 @@ codebot-desktop/codebot.log
 
 # 临时文件
 commit_msg.txt
+# 改前手工备份（如 embedding.py.bak），只作本轮回滚用，不提交
+*.bak
 
 # CodeBot 运行时产物
 .codebot/sessions/
